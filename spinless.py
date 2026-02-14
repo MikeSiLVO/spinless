@@ -46,6 +46,8 @@ class Settings:
     tvshow_nfo_logic: str = "per_item"
     update_all_local: bool = False
 
+    path_substitutions: list = field(default_factory=list)  # List of [from, to] pairs
+
     # Database paths (not saved)
     video_db: str = ""
     texture_db: str = ""
@@ -121,24 +123,52 @@ def find_database(pattern: str) -> Optional[Path]:
     return None
 
 
-def convert_path_for_access(path: str) -> str:
-    """Convert database path to accessible filesystem path (handles WSL)."""
+def convert_path_for_access(path: str, path_subs: Optional[list] = None) -> str:
+    """Convert database path to accessible filesystem path.
+
+    Kodi DBs store paths in the format of the OS they run on. When Spinless
+    runs on a different OS or accesses a remote DB, paths may need conversion.
+    User-defined substitutions are applied first (case-insensitive prefix match
+    with slash normalization), then platform-specific conversions follow.
+    """
     if not path:
+        return path
+
+    # Apply user-defined path substitutions first
+    if path_subs:
+        path_norm = path.replace('\\', '/').lower()
+        for sub_from, sub_to in path_subs:
+            if not sub_from:
+                continue
+            from_norm = sub_from.replace('\\', '/').lower()
+            if path_norm.startswith(from_norm):
+                path = sub_to + path[len(sub_from):]
+                break
+
+    # Windows handles all Windows path formats natively
+    if platform.system() == "Windows":
         return path
 
     is_wsl = "microsoft" in platform.uname().release.lower()
 
+    # UNC paths from Windows DBs: \\server\share\path -> //server/share/path
+    if path.startswith('\\\\'):
+        return path.replace('\\', '/')
+
+    # Drive letter paths from Windows DBs
     if is_wsl and len(path) >= 2 and path[1] == ':':
         drive = path[0].lower()
         if 'a' <= drive <= 'z':
             return f"/mnt/{drive}" + path[2:].replace('\\', '/')
 
-    return path
+    # Normalize any remaining backslashes for non-Windows platforms
+    return path.replace('\\', '/')
 
 
-def has_nfo_file(folder_path: str, nfo_name: Optional[str] = None) -> bool:
+def has_nfo_file(folder_path: str, nfo_name: Optional[str] = None,
+                 path_subs: Optional[list] = None) -> bool:
     """Check if folder contains an NFO file. If nfo_name specified, check that exact file."""
-    converted = convert_path_for_access(folder_path)
+    converted = convert_path_for_access(folder_path, path_subs)
     if not os.path.isdir(converted):
         return False
     if nfo_name:
@@ -146,9 +176,10 @@ def has_nfo_file(folder_path: str, nfo_name: Optional[str] = None) -> bool:
     return len(glob.glob(os.path.join(glob.escape(converted), "*.nfo"))) > 0
 
 
-def has_episode_nfo(folder_path: str, episode_filename: str) -> bool:
+def has_episode_nfo(folder_path: str, episode_filename: str,
+                    path_subs: Optional[list] = None) -> bool:
     """Check if episode has matching NFO file (same name, .nfo extension)."""
-    converted = convert_path_for_access(folder_path)
+    converted = convert_path_for_access(folder_path, path_subs)
     if not os.path.isdir(converted):
         return False
     base_name = os.path.splitext(episode_filename)[0]
@@ -209,7 +240,8 @@ def query_local_artwork(video_db: Path, media_type: str, media_ids: List[int]) -
         conn.close()
 
 
-def get_movies_with_nfo(video_db: Path, progress_callback=None) -> List[int]:
+def get_movies_with_nfo(video_db: Path, progress_callback=None,
+                        path_subs: Optional[list] = None) -> List[int]:
     """Get movie IDs that have NFO files."""
     conn = sqlite3.connect(str(video_db))
     try:
@@ -226,7 +258,7 @@ def get_movies_with_nfo(video_db: Path, progress_callback=None) -> List[int]:
         total = len(rows)
 
         for i, (movie_id, folder_path) in enumerate(rows):
-            if has_nfo_file(folder_path):
+            if has_nfo_file(folder_path, path_subs=path_subs):
                 result.append(movie_id)
             if progress_callback and i % 100 == 0:
                 progress_callback(i, total, f"Scanning movies for NFOs... ({i}/{total})")
@@ -236,7 +268,8 @@ def get_movies_with_nfo(video_db: Path, progress_callback=None) -> List[int]:
         conn.close()
 
 
-def get_tvshows_with_nfo(video_db: Path, progress_callback=None) -> List[int]:
+def get_tvshows_with_nfo(video_db: Path, progress_callback=None,
+                         path_subs: Optional[list] = None) -> List[int]:
     """Get TV show IDs that have tvshow.nfo files."""
     conn = sqlite3.connect(str(video_db))
     try:
@@ -253,7 +286,7 @@ def get_tvshows_with_nfo(video_db: Path, progress_callback=None) -> List[int]:
         total = len(rows)
 
         for i, (show_id, folder_path) in enumerate(rows):
-            if has_nfo_file(folder_path, "tvshow.nfo"):
+            if has_nfo_file(folder_path, "tvshow.nfo", path_subs=path_subs):
                 result.append(show_id)
             if progress_callback and i % 50 == 0:
                 progress_callback(i, total, f"Scanning TV shows for NFOs... ({i}/{total})")
@@ -279,7 +312,8 @@ def get_seasons_for_shows(video_db: Path, show_ids: List[int]) -> List[int]:
 
 
 def get_episodes_with_nfo(video_db: Path, show_ids: Optional[List[int]] = None,
-                          progress_callback=None) -> List[int]:
+                          progress_callback=None,
+                          path_subs: Optional[list] = None) -> List[int]:
     """Get episode IDs that have NFO files. Optionally filter by show IDs."""
     conn = sqlite3.connect(str(video_db))
     try:
@@ -307,7 +341,7 @@ def get_episodes_with_nfo(video_db: Path, show_ids: Optional[List[int]] = None,
         total = len(rows)
 
         for i, (episode_id, folder_path, filename) in enumerate(rows):
-            if has_episode_nfo(folder_path, filename):
+            if has_episode_nfo(folder_path, filename, path_subs=path_subs):
                 result.append(episode_id)
             if progress_callback and i % 200 == 0:
                 progress_callback(i, total, f"Scanning episodes for NFOs... ({i}/{total})")
@@ -400,6 +434,7 @@ def scan_for_updates(video_db: Path, texture_db: Path, settings: Settings,
     """Scan databases and find textures needing updates based on settings."""
     result = ScanResult()
     all_artwork: List[Tuple[int, str, str]] = []
+    path_subs = settings.path_substitutions or None
 
     def log(msg):
         if log_callback:
@@ -412,7 +447,8 @@ def scan_for_updates(video_db: Path, texture_db: Path, settings: Settings,
             movie_ids = query_all_ids(video_db, "movie", "idMovie")
             log(f"  Found {len(movie_ids)} movies (all)")
         else:
-            movie_ids = get_movies_with_nfo(video_db, progress_callback)
+            movie_ids = get_movies_with_nfo(video_db, progress_callback,
+                                            path_subs=path_subs)
             log(f"  Found {len(movie_ids)} movies with NFO files")
 
         result.movie_count = len(movie_ids)
@@ -429,7 +465,8 @@ def scan_for_updates(video_db: Path, texture_db: Path, settings: Settings,
             show_ids = query_all_ids(video_db, "tvshow", "idShow")
             log(f"  Found {len(show_ids)} TV shows (all)")
         else:
-            show_ids = get_tvshows_with_nfo(video_db, progress_callback)
+            show_ids = get_tvshows_with_nfo(video_db, progress_callback,
+                                             path_subs=path_subs)
             log(f"  Found {len(show_ids)} TV shows with tvshow.nfo")
 
         result.tvshow_count = len(show_ids)
@@ -461,10 +498,14 @@ def scan_for_updates(video_db: Path, texture_db: Path, settings: Settings,
                 episode_ids = query_all_ids(video_db, "episode", "idEpisode")
                 log(f"  Found {len(episode_ids)} episodes (all)")
             elif settings.tvshow_nfo_logic == "require_show_nfo":
-                episode_ids = get_episodes_with_nfo(video_db, show_ids, progress_callback)
+                episode_ids = get_episodes_with_nfo(video_db, show_ids,
+                                                    progress_callback,
+                                                    path_subs=path_subs)
                 log(f"  Found {len(episode_ids)} episodes with NFO (in shows with tvshow.nfo)")
             else:
-                episode_ids = get_episodes_with_nfo(video_db, None, progress_callback)
+                episode_ids = get_episodes_with_nfo(video_db, None,
+                                                    progress_callback,
+                                                    path_subs=path_subs)
                 log(f"  Found {len(episode_ids)} episodes with NFO files")
 
             result.episode_count = len(episode_ids)
@@ -509,6 +550,10 @@ def run_cli(video_db: Path, texture_db: Path, settings: Settings, apply: bool = 
         print(f"    Episodes: {'Yes' if settings.include_episodes else 'No'}")
         print(f"    NFO Logic: {settings.tvshow_nfo_logic}")
     print(f"  Update All Local: {'Yes' if settings.update_all_local else 'No (NFO only)'}")
+    if settings.path_substitutions:
+        print(f"  Path Substitutions:")
+        for sub_from, sub_to in settings.path_substitutions:
+            print(f"    {sub_from} -> {sub_to}")
     print()
 
     result = scan_for_updates(video_db, texture_db, settings, log_callback=print)
@@ -559,7 +604,7 @@ class SpinlessApp:
 
         self.root = root
         self.root.title(f"Spinless v{__version__}")
-        self.root.geometry("800x700")
+        self.root.geometry("800x780")
         self.root.resizable(True, True)
 
         self.settings = settings
@@ -672,6 +717,27 @@ class SpinlessApp:
         ttk.Checkbutton(settings_frame, text="Update ALL local artwork (ignore NFO requirement)",
                        variable=self.update_all_local).grid(row=4, column=1, sticky="w", pady=2)
 
+        # Path Substitutions
+        path_frame = ttk.LabelFrame(main, text="Path Substitutions (optional)", padding="10")
+        path_frame.grid(row=row, column=0, columnspan=2, sticky="ew", pady=5)
+        path_frame.columnconfigure(0, weight=1)
+        row += 1
+
+        ttk.Label(path_frame, text="Map database paths to local paths when DB is on a remote machine",
+                  foreground="gray").grid(row=0, column=0, sticky="w")
+
+        self.path_sub_container = ttk.Frame(path_frame)
+        self.path_sub_container.grid(row=1, column=0, sticky="ew")
+        self.path_sub_container.columnconfigure(0, weight=1)
+
+        self.path_sub_rows: list = []
+
+        ttk.Button(path_frame, text="+ Add", width=8,
+                   command=self._add_path_sub).grid(row=2, column=0, sticky="w", pady=(5, 0))
+
+        for sub_from, sub_to in (self.settings.path_substitutions or []):
+            self._add_path_sub(sub_from, sub_to)
+
         # Buttons
         bf = ttk.Frame(main)
         bf.grid(row=row, column=0, columnspan=2, pady=10)
@@ -696,6 +762,35 @@ class SpinlessApp:
         self.results = scrolledtext.ScrolledText(main, height=14, font=("Consolas", 9))
         self.results.grid(row=row, column=0, columnspan=2, sticky="nsew", pady=5)
         main.rowconfigure(row, weight=1)
+
+    def _add_path_sub(self, from_val="", to_val=""):
+        """Add a path substitution row to the GUI."""
+        tk, ttk = self.tk, self.ttk
+        row_idx = len(self.path_sub_rows)
+
+        from_var = tk.StringVar(value=from_val)
+        to_var = tk.StringVar(value=to_val)
+
+        row_frame = ttk.Frame(self.path_sub_container)
+        row_frame.grid(row=row_idx, column=0, sticky="ew", pady=1)
+        row_frame.columnconfigure(1, weight=1)
+        row_frame.columnconfigure(4, weight=1)
+
+        ttk.Label(row_frame, text="From:").grid(row=0, column=0, padx=(0, 3))
+        ttk.Entry(row_frame, textvariable=from_var).grid(row=0, column=1, sticky="ew", padx=2)
+        ttk.Label(row_frame, text="\u2192 To:").grid(row=0, column=3, padx=3)
+        ttk.Entry(row_frame, textvariable=to_var).grid(row=0, column=4, sticky="ew", padx=2)
+
+        entry = (from_var, to_var, row_frame)
+        ttk.Button(row_frame, text="\u2715", width=3,
+                   command=lambda e=entry: self._remove_path_sub(e)).grid(row=0, column=5, padx=(3, 0))
+
+        self.path_sub_rows.append(entry)
+
+    def _remove_path_sub(self, entry):
+        """Remove a path substitution row from the GUI."""
+        self.path_sub_rows.remove(entry)
+        entry[2].destroy()
 
     def _update_tvshow_state(self):
         """Enable/disable TV show options based on checkbox."""
@@ -746,6 +841,8 @@ class SpinlessApp:
             include_episodes=self.include_episodes.get(),
             tvshow_nfo_logic=self.tvshow_nfo_logic.get(),
             update_all_local=self.update_all_local.get(),
+            path_substitutions=[[f.get(), t.get()] for f, t, _ in self.path_sub_rows
+                                if f.get().strip()],
             video_db=self.video_db_path.get(),
             texture_db=self.texture_db_path.get()
         )
@@ -901,6 +998,7 @@ Examples:
   %(prog)s --cli --apply       Apply changes via terminal
   %(prog)s --cli --tvshows     Include TV shows
   %(prog)s --cli --all-local   Update all local artwork (ignore NFO)
+  %(prog)s --cli --path-sub "\\\\server\\share=D:\\Media"  Map remote paths to local
         """
     )
     parser.add_argument("--cli", action="store_true", help="Run in command-line mode (no GUI)")
@@ -922,6 +1020,9 @@ Examples:
     parser.add_argument("--all-local", action="store_true",
                        help="Update all local artwork (ignore NFO requirement)")
 
+    parser.add_argument("--path-sub", action="append", default=[], metavar="FROM=TO",
+                       help="Path substitution (repeatable). Example: --path-sub \"\\\\server\\share=D:\\Media\"")
+
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
 
     args = parser.parse_args()
@@ -940,6 +1041,17 @@ Examples:
         settings.tvshow_nfo_logic = args.nfo_logic
     if args.all_local:
         settings.update_all_local = True
+
+    if args.path_sub:
+        subs = []
+        for sub in args.path_sub:
+            if '=' not in sub:
+                print(f"ERROR: Invalid --path-sub format: {sub}")
+                print("Expected: FROM=TO (e.g., \"\\\\server\\share=D:\\Media\")")
+                sys.exit(1)
+            from_path, to_path = sub.split('=', 1)
+            subs.append([from_path, to_path])
+        settings.path_substitutions = subs
 
     video_db = args.video_db or find_database("MyVideos*.db")
     texture_db = args.texture_db or find_database("Textures*.db")
