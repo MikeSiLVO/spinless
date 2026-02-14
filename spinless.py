@@ -31,7 +31,7 @@ from dataclasses import dataclass, field, asdict
 from pathlib import Path
 from typing import List, Optional, Tuple
 
-__version__ = "1.2.0"
+__version__ = "1.3.0"
 
 FUTURE_DATE = "2099-01-01 00:00:00"
 
