@@ -30,10 +30,14 @@ import urllib.parse
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
 from typing import List, Optional, Tuple
+import logging
+from logging.handlers import RotatingFileHandler
 
-__version__ = "1.3.0"
+__version__ = "1.4.0"
 
 FUTURE_DATE = "2099-01-01 00:00:00"
+
+logger = logging.getLogger("spinless")
 
 
 @dataclass
@@ -62,7 +66,7 @@ class Settings:
                     data = json.load(f)
                 return cls(**{k: v for k, v in data.items() if k in cls.__dataclass_fields__})
             except Exception:
-                pass
+                logger.exception("Failed to load settings from %s", config_path)
         return cls()
 
     def save(self):
@@ -84,6 +88,26 @@ class Settings:
         else:
             base = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config"))
         return base / "spinless" / "settings.json"
+
+
+def setup_logging() -> Path:
+    """Configure rotating file log. Returns log file path."""
+    log_dir = Settings._config_path().parent
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_file = log_dir / "spinless.log"
+
+    handler = RotatingFileHandler(
+        log_file, maxBytes=1_048_576, backupCount=3, encoding="utf-8"
+    )
+    handler.setFormatter(logging.Formatter(
+        "%(asctime)s [%(levelname)s] %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S"
+    ))
+
+    logger.setLevel(logging.DEBUG)
+    if not logger.handlers:
+        logger.addHandler(handler)
+    return log_file
 
 
 # --- Path utilities ---
@@ -119,7 +143,12 @@ def find_database(pattern: str) -> Optional[Path]:
         if db_path.exists():
             matches = sorted(db_path.glob(pattern), reverse=True)
             if matches:
+                logger.debug("Auto-detected database: %s (from %s)", matches[0], db_path)
                 return matches[0]
+            logger.debug("No match for %s in %s", pattern, db_path)
+        else:
+            logger.debug("DB search path does not exist: %s", db_path)
+    logger.debug("No database found matching %s", pattern)
     return None
 
 
@@ -136,6 +165,7 @@ def convert_path_for_access(path: str, path_subs: Optional[list] = None) -> str:
 
     # Apply user-defined path substitutions first
     if path_subs:
+        original = path
         path_norm = path.replace('\\', '/').lower()
         for sub_from, sub_to in path_subs:
             if not sub_from:
@@ -143,6 +173,7 @@ def convert_path_for_access(path: str, path_subs: Optional[list] = None) -> str:
             from_norm = sub_from.replace('\\', '/').lower()
             if path_norm.startswith(from_norm):
                 path = sub_to + path[len(sub_from):]
+                logger.debug("Path sub applied: %s -> %s", original, path)
                 break
 
     # Windows handles all Windows path formats natively
@@ -153,13 +184,17 @@ def convert_path_for_access(path: str, path_subs: Optional[list] = None) -> str:
 
     # UNC paths from Windows DBs: \\server\share\path -> //server/share/path
     if path.startswith('\\\\'):
-        return path.replace('\\', '/')
+        converted = path.replace('\\', '/')
+        logger.debug("UNC path converted: %s -> %s", path, converted)
+        return converted
 
     # Drive letter paths from Windows DBs
     if is_wsl and len(path) >= 2 and path[1] == ':':
         drive = path[0].lower()
         if 'a' <= drive <= 'z':
-            return f"/mnt/{drive}" + path[2:].replace('\\', '/')
+            converted = f"/mnt/{drive}" + path[2:].replace('\\', '/')
+            logger.debug("WSL drive path converted: %s -> %s", path, converted)
+            return converted
 
     # Normalize any remaining backslashes for non-Windows platforms
     return path.replace('\\', '/')
@@ -170,10 +205,17 @@ def has_nfo_file(folder_path: str, nfo_name: Optional[str] = None,
     """Check if folder contains an NFO file. If nfo_name specified, check that exact file."""
     converted = convert_path_for_access(folder_path, path_subs)
     if not os.path.isdir(converted):
+        logger.debug("NFO check: directory not found: %s", converted)
         return False
     if nfo_name:
-        return os.path.exists(os.path.join(converted, nfo_name))
-    return len(glob.glob(os.path.join(glob.escape(converted), "*.nfo"))) > 0
+        found = os.path.exists(os.path.join(converted, nfo_name))
+        if not found:
+            logger.debug("NFO check: %s not found in %s", nfo_name, converted)
+        return found
+    found = len(glob.glob(os.path.join(glob.escape(converted), "*.nfo"))) > 0
+    if not found:
+        logger.debug("NFO check: no *.nfo files in %s", converted)
+    return found
 
 
 def has_episode_nfo(folder_path: str, episode_filename: str,
@@ -181,10 +223,14 @@ def has_episode_nfo(folder_path: str, episode_filename: str,
     """Check if episode has matching NFO file (same name, .nfo extension)."""
     converted = convert_path_for_access(folder_path, path_subs)
     if not os.path.isdir(converted):
+        logger.debug("Episode NFO check: directory not found: %s", converted)
         return False
     base_name = os.path.splitext(episode_filename)[0]
     nfo_path = os.path.join(converted, base_name + ".nfo")
-    return os.path.exists(nfo_path)
+    found = os.path.exists(nfo_path)
+    if not found:
+        logger.debug("Episode NFO check: %s.nfo not found in %s", base_name, converted)
+    return found
 
 
 def normalize_url_for_texture(url: str) -> str:
@@ -213,7 +259,9 @@ def query_all_ids(video_db: Path, table: str, id_column: str) -> List[int]:
     try:
         cursor = conn.cursor()
         cursor.execute(f"SELECT {id_column} FROM {table}")
-        return [row[0] for row in cursor.fetchall()]
+        ids = [row[0] for row in cursor.fetchall()]
+        logger.debug("query_all_ids: %s.%s returned %d rows", table, id_column, len(ids))
+        return ids
     finally:
         conn.close()
 
@@ -235,7 +283,10 @@ def query_local_artwork(video_db: Path, media_type: str, media_ids: List[int]) -
               AND url NOT LIKE 'http%'
               AND url NOT LIKE 'image://%'
         """, [media_type] + list(media_ids))
-        return cursor.fetchall()
+        rows = cursor.fetchall()
+        logger.debug("query_local_artwork: %s with %d IDs returned %d entries",
+                     media_type, len(media_ids), len(rows))
+        return rows
     finally:
         conn.close()
 
@@ -263,6 +314,7 @@ def get_movies_with_nfo(video_db: Path, progress_callback=None,
             if progress_callback and i % 100 == 0:
                 progress_callback(i, total, f"Scanning movies for NFOs... ({i}/{total})")
 
+        logger.debug("get_movies_with_nfo: %d/%d movies have NFO files", len(result), total)
         return result
     finally:
         conn.close()
@@ -291,6 +343,7 @@ def get_tvshows_with_nfo(video_db: Path, progress_callback=None,
             if progress_callback and i % 50 == 0:
                 progress_callback(i, total, f"Scanning TV shows for NFOs... ({i}/{total})")
 
+        logger.debug("get_tvshows_with_nfo: %d/%d shows have tvshow.nfo", len(result), total)
         return result
     finally:
         conn.close()
@@ -346,6 +399,7 @@ def get_episodes_with_nfo(video_db: Path, show_ids: Optional[List[int]] = None,
             if progress_callback and i % 200 == 0:
                 progress_callback(i, total, f"Scanning episodes for NFOs... ({i}/{total})")
 
+        logger.debug("get_episodes_with_nfo: %d/%d episodes have NFO files", len(result), total)
         return result
     finally:
         conn.close()
@@ -380,6 +434,8 @@ def find_textures_to_update(
         else:
             urls_not_found += 1
 
+    logger.debug("Texture matching: %d to update, %d not cached (from %d artwork, %d textures in DB)",
+                 len(textures_to_update), urls_not_found, len(artwork_urls), len(all_textures))
     return textures_to_update, urls_not_found
 
 
@@ -391,6 +447,7 @@ def check_database_writable(texture_db: Path):
         conn.rollback()
         conn.close()
     except sqlite3.OperationalError:
+        logger.error("Texture database is locked: %s", texture_db)
         raise RuntimeError(
             f"Texture database is locked: {texture_db}\n"
             "Close Kodi and try again."
@@ -399,6 +456,7 @@ def check_database_writable(texture_db: Path):
 
 def apply_updates(texture_db: Path, textures: List[Tuple[int, str, str]]) -> int:
     """Apply lasthashcheck updates to texture database."""
+    logger.info("Applying updates to %d textures in %s", len(textures), texture_db)
     check_database_writable(texture_db)
 
     conn = sqlite3.connect(str(texture_db))
@@ -410,6 +468,7 @@ def apply_updates(texture_db: Path, textures: List[Tuple[int, str, str]]) -> int
                 (FUTURE_DATE, texture_id)
             )
         conn.commit()
+        logger.info("Successfully updated %d textures", len(textures))
         return len(textures)
     finally:
         conn.close()
@@ -529,6 +588,14 @@ def scan_for_updates(video_db: Path, texture_db: Path, settings: Settings,
 
 def run_cli(video_db: Path, texture_db: Path, settings: Settings, apply: bool = False) -> int:
     """Run in command-line mode."""
+    logger.info("CLI mode started (apply=%s)", apply)
+    logger.info("Video DB: %s | Texture DB: %s", video_db, texture_db)
+    logger.info("Settings: movies=%s tvshows=%s seasons=%s episodes=%s nfo_logic=%s all_local=%s",
+                settings.include_movies, settings.include_tvshows, settings.include_seasons,
+                settings.include_episodes, settings.tvshow_nfo_logic, settings.update_all_local)
+    if settings.path_substitutions:
+        for sub_from, sub_to in settings.path_substitutions:
+            logger.info("Path sub: %s -> %s", sub_from, sub_to)
     print(f"Spinless v{__version__}")
     print("=" * 50)
     print()
@@ -551,12 +618,17 @@ def run_cli(video_db: Path, texture_db: Path, settings: Settings, apply: bool = 
         print(f"    NFO Logic: {settings.tvshow_nfo_logic}")
     print(f"  Update All Local: {'Yes' if settings.update_all_local else 'No (NFO only)'}")
     if settings.path_substitutions:
-        print(f"  Path Substitutions:")
+        print("  Path Substitutions:")
         for sub_from, sub_to in settings.path_substitutions:
             print(f"    {sub_from} -> {sub_to}")
     print()
 
-    result = scan_for_updates(video_db, texture_db, settings, log_callback=print)
+    def cli_log(msg):
+        print(msg)
+        if msg.strip():
+            logger.info(msg.strip())
+
+    result = scan_for_updates(video_db, texture_db, settings, log_callback=cli_log)
     print()
 
     if not result.textures_to_update:
@@ -576,6 +648,7 @@ def run_cli(video_db: Path, texture_db: Path, settings: Settings, apply: bool = 
     if apply:
         print("Applying updates...")
         count = apply_updates(texture_db, result.textures_to_update)
+        logger.info("CLI apply complete: %d textures updated", count)
         print(f"  Updated {count} textures")
         print()
         print("Done!")
@@ -820,6 +893,8 @@ class SpinlessApp:
         self.results.insert(self.tk.END, msg + "\n")
         self.results.see(self.tk.END)
         self.root.update_idletasks()
+        if msg.strip():
+            logger.info(msg.strip())
 
     def _clear_log(self):
         self.results.delete(1.0, self.tk.END)
@@ -859,17 +934,25 @@ class SpinlessApp:
         messagebox = self._get_messagebox()
 
         if not video_db or not os.path.exists(video_db):
+            logger.error("GUI validation: Video database not found: %s", video_db)
             messagebox.showerror("Error", "Video database not found")
             return
         if not texture_db or not os.path.exists(texture_db):
+            logger.error("GUI validation: Texture database not found: %s", texture_db)
             messagebox.showerror("Error", "Texture database not found")
             return
 
         if not self.include_movies.get() and not self.include_tvshows.get():
+            logger.error("GUI validation: No content type selected")
             messagebox.showerror("Error", "Select at least one content type")
             return
 
-        self._save_settings()
+        try:
+            self._save_settings()
+        except Exception as e:
+            logger.exception("Failed to save settings")
+            messagebox.showwarning("Warning", f"Could not save settings: {e}")
+
         self._set_buttons(scanning=True)
         self._clear_log()
         self.textures_to_update = []
@@ -879,6 +962,7 @@ class SpinlessApp:
             try:
                 self._do_scan(Path(video_db), Path(texture_db))
             except Exception as e:
+                logger.exception("Scan failed")
                 msg = str(e)
                 self.root.after(0, lambda m=msg: self._log(f"\nERROR: {m}"))
             finally:
@@ -893,7 +977,14 @@ class SpinlessApp:
         self._set_status("Scan complete" if can_apply else "Nothing to update")
 
     def _do_scan(self, video_db: Path, texture_db: Path):
+        logger.info("GUI scan started: video_db=%s texture_db=%s", video_db, texture_db)
         settings = self._get_current_settings()
+        logger.info("Settings: movies=%s tvshows=%s seasons=%s episodes=%s nfo_logic=%s all_local=%s",
+                    settings.include_movies, settings.include_tvshows, settings.include_seasons,
+                    settings.include_episodes, settings.tvshow_nfo_logic, settings.update_all_local)
+        if settings.path_substitutions:
+            for sub_from, sub_to in settings.path_substitutions:
+                logger.info("Path sub: %s -> %s", sub_from, sub_to)
 
         def log(msg):
             self.root.after(0, lambda m=msg: self._log(m))
@@ -952,9 +1043,11 @@ class SpinlessApp:
             try:
                 texture_db = Path(self.texture_db_path.get())
                 count = apply_updates(texture_db, self.textures_to_update)
+                logger.info("GUI apply complete: %d textures updated", count)
                 self.root.after(0, lambda c=count: self._log(f"\nUpdated {c} textures!"))
                 self.root.after(0, lambda c=count: messagebox.showinfo("Done", f"Updated {c} textures"))
             except Exception as e:
+                logger.exception("Apply failed")
                 msg = str(e)
                 self.root.after(0, lambda m=msg: self._log(f"\nERROR: {m}"))
                 self.root.after(0, lambda m=msg: messagebox.showerror("Error", m))
@@ -970,7 +1063,8 @@ class SpinlessApp:
         self.textures_to_update = []
 
 
-def run_gui(video_db: Optional[Path], texture_db: Optional[Path], settings: Settings):
+def run_gui(video_db: Optional[Path], texture_db: Optional[Path], settings: Settings,
+            log_file: Optional[Path] = None):
     """Run in GUI mode."""
     try:
         import tkinter as tk
@@ -981,7 +1075,9 @@ def run_gui(video_db: Optional[Path], texture_db: Optional[Path], settings: Sett
         sys.exit(1)
 
     root = tk.Tk()
-    SpinlessApp(root, video_db, texture_db, settings)
+    app = SpinlessApp(root, video_db, texture_db, settings)
+    if log_file:
+        app._log(f"Log file: {log_file}")
     root.mainloop()
 
 
@@ -1027,6 +1123,13 @@ Examples:
 
     args = parser.parse_args()
 
+    try:
+        log_file = setup_logging()
+        logger.info("Spinless v%s started (platform=%s)", __version__, platform.system())
+    except Exception as e:
+        print(f"Warning: Could not set up log file: {e}", file=sys.stderr)
+        log_file = None
+
     settings = Settings.load()
 
     if args.movies is not None:
@@ -1057,15 +1160,19 @@ Examples:
     texture_db = args.texture_db or find_database("Textures*.db")
 
     if args.cli:
+        if log_file:
+            print(f"Log file: {log_file}\n")
         if not video_db or not video_db.exists():
+            logger.error("Video database not found: %s", video_db)
             print("ERROR: Video database not found. Use --video-db to specify path.")
             sys.exit(1)
         if not texture_db or not texture_db.exists():
+            logger.error("Texture database not found: %s", texture_db)
             print("ERROR: Texture database not found. Use --texture-db to specify path.")
             sys.exit(1)
         run_cli(video_db, texture_db, settings, args.apply)
     else:
-        run_gui(video_db, texture_db, settings)
+        run_gui(video_db, texture_db, settings, log_file=log_file)
 
 
 if __name__ == "__main__":

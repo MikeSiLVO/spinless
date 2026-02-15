@@ -75,6 +75,7 @@ python spinless.py --cli --video-db /path/to/MyVideos131.db --texture-db /path/t
 | `--no-episodes` | Exclude episodes when processing TV shows |
 | `--nfo-logic` | Episode NFO logic: `per_item` (default) or `require_show_nfo` |
 | `--all-local` | Update ALL local artwork (ignore NFO requirement) |
+| `--path-sub FROM=TO` | Path substitution for remote DB access (repeatable) |
 | `--video-db PATH` | Path to MyVideos*.db |
 | `--texture-db PATH` | Path to Textures*.db |
 
@@ -121,6 +122,32 @@ Settings are saved to:
 | Windows | `%APPDATA%\spinless\settings.json` |
 | Linux | `~/.config/spinless/settings.json` |
 | macOS | `~/Library/Application Support/spinless/settings.json` |
+
+## Logging
+
+Spinless automatically logs to a rotating log file in the same directory as settings. No configuration needed.
+
+| Platform | Log file |
+|----------|----------|
+| Windows | `%APPDATA%\spinless\spinless.log` |
+| Linux | `~/.config/spinless/spinless.log` |
+| macOS | `~/Library/Application Support/spinless/spinless.log` |
+
+- **Rotation**: 1 MB max per file, 3 backups kept (`spinless.log.1`, `.2`, `.3`) — 4 MB total cap
+- **Verbosity**: Always logs at DEBUG level for full diagnostic detail
+- **Log file path** is shown in the CLI output and in the GUI results pane on startup
+
+The log captures:
+
+- Settings, database paths, and path substitutions used for each run
+- Scan progress: item counts, artwork found, textures matched
+- Per-item NFO check results — which directories weren't found and which were missing NFO files
+- Path conversions (WSL drive mapping, UNC paths, user-defined substitutions)
+- Database auto-detection: which paths were searched and what was found
+- Apply operations: how many textures were updated
+- Errors with full tracebacks
+
+The log is the first place to check when results are unexpected (e.g., fewer items found than expected). Run a scan, then check the log for `"directory not found"` or `"not found in"` entries to see exactly which items were skipped and why.
 
 ## Database Locations
 
