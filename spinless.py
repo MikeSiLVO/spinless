@@ -33,7 +33,7 @@ from typing import List, Optional, Tuple
 import logging
 from logging.handlers import RotatingFileHandler
 
-__version__ = "1.4.0"
+__version__ = "1.4.1"
 
 FUTURE_DATE = "2099-01-01 00:00:00"
 
@@ -155,10 +155,13 @@ def find_database(pattern: str) -> Optional[Path]:
 def convert_path_for_access(path: str, path_subs: Optional[list] = None) -> str:
     """Convert database path to accessible filesystem path.
 
-    Kodi DBs store paths in the format of the OS they run on. When Spinless
-    runs on a different OS or accesses a remote DB, paths may need conversion.
-    User-defined substitutions are applied first (case-insensitive prefix match
-    with slash normalization), then platform-specific conversions follow.
+    Kodi DBs may store paths as smb:// URIs (for network sources), UNC paths,
+    or local drive paths. User-defined substitutions are applied first
+    (case-insensitive prefix match with slash normalization), then
+    platform-specific conversions follow:
+    - smb:// URIs are converted to UNC paths (\\\\host\\share\\path)
+    - UNC backslashes are normalized to forward slashes on non-Windows
+    - Drive letters are converted to /mnt/<letter> on WSL
     """
     if not path:
         return path
@@ -175,6 +178,14 @@ def convert_path_for_access(path: str, path_subs: Optional[list] = None) -> str:
                 path = sub_to + path[len(sub_from):]
                 logger.debug("Path sub applied: %s -> %s", original, path)
                 break
+
+    # Kodi stores SMB sources as smb:// URIs regardless of platform
+    if path.lower().startswith('smb://'):
+        # smb://host/share/path -> \\host\share\path (UNC)
+        smb_path = path[6:]  # strip "smb://"
+        converted = '\\\\' + smb_path.replace('/', '\\')
+        logger.debug("SMB to UNC converted: %s -> %s", path, converted)
+        return converted
 
     # Windows handles all Windows path formats natively
     if platform.system() == "Windows":
