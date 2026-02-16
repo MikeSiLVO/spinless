@@ -20,7 +20,7 @@ Spinless sets the `lasthashcheck` date in Kodi's texture database to a far futur
 
 - **Cross-platform**: Windows, Linux, macOS
 - **GUI and CLI modes**: Use whichever you prefer
-- **Video library**: Movies, TV shows (seasons, episodes), and actors
+- **Video library**: Movies, sets, TV shows (seasons, episodes), music videos, and actors
 - **Music library**: Artists and albums
 - **Safe**: Dry-run by default, preview changes before applying
 - **Selective**: Only affects items with NFO files (or all local artwork with advanced option)
@@ -41,7 +41,7 @@ python spinless.py
 ```
 
 1. Databases are auto-detected (or browse to select manually)
-2. Configure content types (Movies, TV Shows, Actors, Music Artists/Albums) and options
+2. Configure content types and options
 3. Click **Scan (Dry Run)** to preview changes
 4. Click **Apply Changes** to update the database
 
@@ -74,9 +74,11 @@ python spinless.py --cli --video-db /path/to/MyVideos131.db --texture-db /path/t
 | `--cli` | Run in command-line mode (no GUI) |
 | `--apply` | Apply changes (default is dry-run) |
 | `--movies` / `--no-movies` | Include/exclude movies (default: include) |
+| `--sets` / `--no-sets` | Include/exclude movie sets (default: include) |
 | `--tvshows` | Include TV shows |
 | `--no-seasons` | Exclude seasons when processing TV shows |
 | `--no-episodes` | Exclude episodes when processing TV shows |
+| `--musicvideos` | Include music videos |
 | `--actors` / `--no-actors` | Include/exclude actors (default: include) |
 | `--music-artists` | Include music artists |
 | `--music-albums` | Include music albums |

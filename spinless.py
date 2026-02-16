@@ -33,7 +33,7 @@ from typing import List, Optional, Tuple
 import logging
 from logging.handlers import RotatingFileHandler
 
-__version__ = "1.5.0"
+__version__ = "1.6.0"
 
 FUTURE_DATE = "2099-01-01 00:00:00"
 
@@ -44,10 +44,12 @@ logger = logging.getLogger("spinless")
 class Settings:
     """Application settings with persistence."""
     include_movies: bool = True
+    include_sets: bool = True
     include_tvshows: bool = False
     include_seasons: bool = True
     include_episodes: bool = True
     include_actors: bool = True
+    include_musicvideos: bool = False
     include_music_artists: bool = False
     include_music_albums: bool = False
     tvshow_nfo_logic: str = "per_item"
@@ -269,9 +271,11 @@ def _chunked(items: list, size: int):
 
 _VALID_TABLE_COLUMNS = {
     ("movie", "idMovie"),
+    ("sets", "idSet"),
     ("tvshow", "idShow"),
     ("seasons", "idSeason"),
     ("episode", "idEpisode"),
+    ("musicvideo", "idMVideo"),
     ("actor", "actor_id"),
     ("artist", "idArtist"),
     ("album", "idAlbum"),
@@ -544,9 +548,11 @@ def apply_updates(texture_db: Path, textures: List[Tuple[int, str, str]]) -> int
 class ScanResult:
     """Results from scanning for artwork to update."""
     movie_count: int = 0
+    set_count: int = 0
     tvshow_count: int = 0
     season_count: int = 0
     episode_count: int = 0
+    musicvideo_count: int = 0
     actor_count: int = 0
     artist_count: int = 0
     album_count: int = 0
@@ -586,6 +592,18 @@ def scan_for_updates(video_db: Optional[Path], texture_db: Path, settings: Setti
         if movie_ids:
             artwork = query_local_artwork(video_db, "movie", movie_ids)
             log(f"  Found {len(artwork)} local movie artwork entries")
+            all_artwork.extend(artwork)
+
+    # Movie Sets
+    if settings.include_sets and video_db:
+        log("\nScanning movie sets...")
+        set_ids = query_all_ids(video_db, "sets", "idSet")
+        log(f"  Found {len(set_ids)} sets")
+
+        result.set_count = len(set_ids)
+        if set_ids:
+            artwork = query_local_artwork(video_db, "set", set_ids)
+            log(f"  Found {len(artwork)} local set artwork entries")
             all_artwork.extend(artwork)
 
     # TV Shows
@@ -644,6 +662,18 @@ def scan_for_updates(video_db: Optional[Path], texture_db: Path, settings: Setti
                 artwork = query_local_artwork(video_db, "episode", episode_ids)
                 log(f"  Found {len(artwork)} local episode artwork entries")
                 all_artwork.extend(artwork)
+
+    # Music Videos
+    if settings.include_musicvideos and video_db:
+        log("\nScanning music videos...")
+        musicvideo_ids = query_all_ids(video_db, "musicvideo", "idMVideo")
+        log(f"  Found {len(musicvideo_ids)} music videos")
+
+        result.musicvideo_count = len(musicvideo_ids)
+        if musicvideo_ids:
+            artwork = query_local_artwork(video_db, "musicvideo", musicvideo_ids)
+            log(f"  Found {len(artwork)} local music video artwork entries")
+            all_artwork.extend(artwork)
 
     # Actors
     if settings.include_actors and video_db and (settings.include_movies or settings.include_tvshows):
@@ -708,10 +738,12 @@ def run_cli(video_db: Optional[Path], texture_db: Path, settings: Settings,
     """Run in command-line mode."""
     logger.info("CLI mode started (apply=%s)", apply)
     logger.info("Video DB: %s | Texture DB: %s | Music DB: %s", video_db, texture_db, music_db)
-    logger.info("Settings: movies=%s tvshows=%s seasons=%s episodes=%s actors=%s "
-                "music_artists=%s music_albums=%s nfo_logic=%s all_local=%s",
-                settings.include_movies, settings.include_tvshows, settings.include_seasons,
-                settings.include_episodes, settings.include_actors,
+    logger.info("Settings: movies=%s sets=%s tvshows=%s seasons=%s episodes=%s "
+                "musicvideos=%s actors=%s music_artists=%s music_albums=%s nfo_logic=%s all_local=%s",
+                settings.include_movies, settings.include_sets,
+                settings.include_tvshows, settings.include_seasons,
+                settings.include_episodes, settings.include_musicvideos,
+                settings.include_actors,
                 settings.include_music_artists, settings.include_music_albums,
                 settings.tvshow_nfo_logic, settings.update_all_local)
     if settings.path_substitutions:
@@ -735,11 +767,13 @@ def run_cli(video_db: Optional[Path], texture_db: Path, settings: Settings,
 
     print("Settings:")
     print(f"  Movies: {'Yes' if settings.include_movies else 'No'}")
+    print(f"  Movie Sets: {'Yes' if settings.include_sets else 'No'}")
     print(f"  TV Shows: {'Yes' if settings.include_tvshows else 'No'}")
     if settings.include_tvshows:
         print(f"    Seasons: {'Yes' if settings.include_seasons else 'No'}")
         print(f"    Episodes: {'Yes' if settings.include_episodes else 'No'}")
         print(f"    NFO Logic: {settings.tvshow_nfo_logic}")
+    print(f"  Music Videos: {'Yes' if settings.include_musicvideos else 'No'}")
     print(f"  Actors: {'Yes' if settings.include_actors else 'No'}")
     print(f"  Music Artists: {'Yes' if settings.include_music_artists else 'No'}")
     print(f"  Music Albums: {'Yes' if settings.include_music_albums else 'No'}")
@@ -816,9 +850,11 @@ class SpinlessApp:
         self.textures_to_update: List[Tuple[int, str, str]] = []
 
         self.include_movies = tk.BooleanVar(value=settings.include_movies)
+        self.include_sets = tk.BooleanVar(value=settings.include_sets)
         self.include_tvshows = tk.BooleanVar(value=settings.include_tvshows)
         self.include_seasons = tk.BooleanVar(value=settings.include_seasons)
         self.include_episodes = tk.BooleanVar(value=settings.include_episodes)
+        self.include_musicvideos = tk.BooleanVar(value=settings.include_musicvideos)
         self.include_actors = tk.BooleanVar(value=settings.include_actors)
         self.include_music_artists = tk.BooleanVar(value=settings.include_music_artists)
         self.include_music_albums = tk.BooleanVar(value=settings.include_music_albums)
@@ -900,8 +936,10 @@ class SpinlessApp:
         content_frame.grid(row=0, column=1, sticky="w", pady=2)
 
         ttk.Checkbutton(content_frame, text="Movies", variable=self.include_movies).pack(side="left", padx=(0, 15))
+        ttk.Checkbutton(content_frame, text="Sets", variable=self.include_sets).pack(side="left", padx=(0, 15))
         ttk.Checkbutton(content_frame, text="TV Shows", variable=self.include_tvshows,
                        command=self._update_tvshow_state).pack(side="left", padx=(0, 15))
+        ttk.Checkbutton(content_frame, text="Music Videos", variable=self.include_musicvideos).pack(side="left", padx=(0, 15))
         ttk.Checkbutton(content_frame, text="Actors", variable=self.include_actors).pack(side="left")
 
         # Music Types
@@ -1069,9 +1107,11 @@ class SpinlessApp:
         """Get current settings from GUI."""
         return Settings(
             include_movies=self.include_movies.get(),
+            include_sets=self.include_sets.get(),
             include_tvshows=self.include_tvshows.get(),
             include_seasons=self.include_seasons.get(),
             include_episodes=self.include_episodes.get(),
+            include_musicvideos=self.include_musicvideos.get(),
             include_actors=self.include_actors.get(),
             include_music_artists=self.include_music_artists.get(),
             include_music_albums=self.include_music_albums.get(),
@@ -1096,7 +1136,9 @@ class SpinlessApp:
         music_db = self.music_db_path.get()
         messagebox = self._get_messagebox()
 
-        wants_video = self.include_movies.get() or self.include_tvshows.get() or self.include_actors.get()
+        wants_video = (self.include_movies.get() or self.include_sets.get()
+                       or self.include_tvshows.get() or self.include_musicvideos.get()
+                       or self.include_actors.get())
         wants_music = self.include_music_artists.get() or self.include_music_albums.get()
 
         if wants_video and (not video_db or not os.path.exists(video_db)):
@@ -1155,10 +1197,12 @@ class SpinlessApp:
         logger.info("GUI scan started: video_db=%s texture_db=%s music_db=%s",
                     video_db, texture_db, music_db)
         settings = self._get_current_settings()
-        logger.info("Settings: movies=%s tvshows=%s seasons=%s episodes=%s actors=%s "
-                    "music_artists=%s music_albums=%s nfo_logic=%s all_local=%s",
-                    settings.include_movies, settings.include_tvshows, settings.include_seasons,
-                    settings.include_episodes, settings.include_actors,
+        logger.info("Settings: movies=%s sets=%s tvshows=%s seasons=%s episodes=%s "
+                    "musicvideos=%s actors=%s music_artists=%s music_albums=%s nfo_logic=%s all_local=%s",
+                    settings.include_movies, settings.include_sets,
+                    settings.include_tvshows, settings.include_seasons,
+                    settings.include_episodes, settings.include_musicvideos,
+                    settings.include_actors,
                     settings.include_music_artists, settings.include_music_albums,
                     settings.tvshow_nfo_logic, settings.update_all_local)
         if settings.path_substitutions:
@@ -1194,6 +1238,10 @@ class SpinlessApp:
             log(f"  Seasons: {result.season_count}")
         if result.episode_count:
             log(f"  Episodes: {result.episode_count}")
+        if result.set_count:
+            log(f"  Movie Sets: {result.set_count}")
+        if result.musicvideo_count:
+            log(f"  Music Videos: {result.musicvideo_count}")
         if result.actor_count:
             log(f"  Actors: {result.actor_count}")
         if result.artist_count:
@@ -1294,6 +1342,10 @@ Examples:
                        help="Include movies (default: yes)")
     parser.add_argument("--no-movies", action="store_false", dest="movies",
                        help="Exclude movies")
+    parser.add_argument("--sets", action="store_true", dest="sets", default=None,
+                       help="Include movie sets (default: yes)")
+    parser.add_argument("--no-sets", action="store_false", dest="sets",
+                       help="Exclude movie sets")
     parser.add_argument("--tvshows", action="store_true", help="Include TV shows")
     parser.add_argument("--no-seasons", action="store_true", help="Exclude seasons")
     parser.add_argument("--no-episodes", action="store_true", help="Exclude episodes")
@@ -1301,6 +1353,8 @@ Examples:
                        help="Include actors (default: yes)")
     parser.add_argument("--no-actors", action="store_false", dest="actors",
                        help="Exclude actors")
+    parser.add_argument("--musicvideos", action="store_true",
+                       help="Include music videos")
     parser.add_argument("--music-artists", action="store_true",
                        help="Include music artists")
     parser.add_argument("--music-albums", action="store_true",
@@ -1330,6 +1384,8 @@ Examples:
 
     if args.movies is not None:
         settings.include_movies = args.movies
+    if args.sets is not None:
+        settings.include_sets = args.sets
     if args.tvshows:
         settings.include_tvshows = True
     if args.no_seasons:
@@ -1338,6 +1394,8 @@ Examples:
         settings.include_episodes = False
     if args.actors is not None:
         settings.include_actors = args.actors
+    if args.musicvideos:
+        settings.include_musicvideos = True
     if args.music_artists:
         settings.include_music_artists = True
     if args.music_albums:
@@ -1362,7 +1420,8 @@ Examples:
     music_db = args.music_db or find_database("MyMusic*.db")
     texture_db = args.texture_db or find_database("Textures*.db")
 
-    wants_video = settings.include_movies or settings.include_tvshows or settings.include_actors
+    wants_video = (settings.include_movies or settings.include_sets or settings.include_tvshows
+                   or settings.include_musicvideos or settings.include_actors)
     wants_music = settings.include_music_artists or settings.include_music_albums
 
     if args.cli:
