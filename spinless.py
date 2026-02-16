@@ -258,6 +258,15 @@ def normalize_url_for_texture(url: str) -> str:
 
 # --- Database queries ---
 
+_SQLITE_VAR_LIMIT = 900  # Conservative limit below SQLite's default 999
+
+
+def _chunked(items: list, size: int):
+    """Yield successive chunks of items."""
+    for i in range(0, len(items), size):
+        yield items[i:i + size]
+
+
 _VALID_TABLE_COLUMNS = {
     ("movie", "idMovie"),
     ("tvshow", "idShow"),
@@ -292,16 +301,18 @@ def query_local_artwork(video_db: Path, media_type: str, media_ids: List[int]) -
     conn = sqlite3.connect(str(video_db))
     try:
         cursor = conn.cursor()
-        placeholders = ','.join('?' * len(media_ids))
-        cursor.execute(f"""
-            SELECT media_id, type, url
-            FROM art
-            WHERE media_type = ?
-              AND media_id IN ({placeholders})
-              AND url NOT LIKE 'http%'
-              AND url NOT LIKE 'image://%'
-        """, [media_type] + list(media_ids))
-        rows = cursor.fetchall()
+        rows: List[Tuple[int, str, str]] = []
+        for chunk in _chunked(list(media_ids), _SQLITE_VAR_LIMIT):
+            placeholders = ','.join('?' * len(chunk))
+            cursor.execute(f"""
+                SELECT media_id, type, url
+                FROM art
+                WHERE media_type = ?
+                  AND media_id IN ({placeholders})
+                  AND url NOT LIKE 'http%'
+                  AND url NOT LIKE 'image://%'
+            """, [media_type] + chunk)
+            rows.extend(cursor.fetchall())
         logger.debug("query_local_artwork: %s with %d IDs returned %d entries",
                      media_type, len(media_ids), len(rows))
         return rows
@@ -375,9 +386,12 @@ def get_seasons_for_shows(video_db: Path, show_ids: List[int]) -> List[int]:
     conn = sqlite3.connect(str(video_db))
     try:
         cursor = conn.cursor()
-        placeholders = ','.join('?' * len(show_ids))
-        cursor.execute(f"SELECT idSeason FROM seasons WHERE idShow IN ({placeholders})", show_ids)
-        return [row[0] for row in cursor.fetchall()]
+        result = []
+        for chunk in _chunked(list(show_ids), _SQLITE_VAR_LIMIT):
+            placeholders = ','.join('?' * len(chunk))
+            cursor.execute(f"SELECT idSeason FROM seasons WHERE idShow IN ({placeholders})", chunk)
+            result.extend(row[0] for row in cursor.fetchall())
+        return result
     finally:
         conn.close()
 
@@ -391,14 +405,17 @@ def get_episodes_with_nfo(video_db: Path, show_ids: Optional[List[int]] = None,
         cursor = conn.cursor()
 
         if show_ids:
-            placeholders = ','.join('?' * len(show_ids))
-            cursor.execute(f"""
-                SELECT e.idEpisode, p.strPath, f.strFilename
-                FROM episode e
-                JOIN files f ON e.idFile = f.idFile
-                JOIN path p ON f.idPath = p.idPath
-                WHERE e.idShow IN ({placeholders})
-            """, show_ids)
+            rows = []
+            for chunk in _chunked(list(show_ids), _SQLITE_VAR_LIMIT):
+                placeholders = ','.join('?' * len(chunk))
+                cursor.execute(f"""
+                    SELECT e.idEpisode, p.strPath, f.strFilename
+                    FROM episode e
+                    JOIN files f ON e.idFile = f.idFile
+                    JOIN path p ON f.idPath = p.idPath
+                    WHERE e.idShow IN ({placeholders})
+                """, chunk)
+                rows.extend(cursor.fetchall())
         else:
             cursor.execute("""
                 SELECT e.idEpisode, p.strPath, f.strFilename
@@ -406,9 +423,9 @@ def get_episodes_with_nfo(video_db: Path, show_ids: Optional[List[int]] = None,
                 JOIN files f ON e.idFile = f.idFile
                 JOIN path p ON f.idPath = p.idPath
             """)
+            rows = cursor.fetchall()
 
         result = []
-        rows = cursor.fetchall()
         total = len(rows)
 
         for i, (episode_id, folder_path, filename) in enumerate(rows):
@@ -435,13 +452,14 @@ def get_actors_for_items(video_db: Path, movie_ids: List[int],
                                        ("episode", episode_ids)]:
             if not media_ids:
                 continue
-            placeholders = ','.join('?' * len(media_ids))
-            cursor.execute(
-                f"SELECT DISTINCT actor_id FROM actor_link "
-                f"WHERE media_type = ? AND media_id IN ({placeholders})",
-                [media_type] + list(media_ids)
-            )
-            all_actor_ids.update(row[0] for row in cursor.fetchall())
+            for chunk in _chunked(list(media_ids), _SQLITE_VAR_LIMIT):
+                placeholders = ','.join('?' * len(chunk))
+                cursor.execute(
+                    f"SELECT DISTINCT actor_id FROM actor_link "
+                    f"WHERE media_type = ? AND media_id IN ({placeholders})",
+                    [media_type] + chunk
+                )
+                all_actor_ids.update(row[0] for row in cursor.fetchall())
 
         result = sorted(all_actor_ids)
         logger.debug("get_actors_for_items: %d unique actors from %d movies, %d shows, %d episodes",

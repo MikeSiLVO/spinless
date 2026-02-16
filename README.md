@@ -20,7 +20,8 @@ Spinless sets the `lasthashcheck` date in Kodi's texture database to a far futur
 
 - **Cross-platform**: Windows, Linux, macOS
 - **GUI and CLI modes**: Use whichever you prefer
-- **Movies and TV shows**: Full support for movies, shows, seasons, and episodes
+- **Video library**: Movies, TV shows (seasons, episodes), and actors
+- **Music library**: Artists and albums
 - **Safe**: Dry-run by default, preview changes before applying
 - **Selective**: Only affects items with NFO files (or all local artwork with advanced option)
 - **Auto-detection**: Finds Kodi databases automatically
@@ -40,14 +41,14 @@ python spinless.py
 ```
 
 1. Databases are auto-detected (or browse to select manually)
-2. Configure content types (Movies, TV Shows) and options
+2. Configure content types (Movies, TV Shows, Actors, Music Artists/Albums) and options
 3. Click **Scan (Dry Run)** to preview changes
 4. Click **Apply Changes** to update the database
 
 ### CLI Mode
 
 ```bash
-# Dry run - movies only (default)
+# Dry run - movies and actors (default)
 python spinless.py --cli
 
 # Include TV shows
@@ -58,6 +59,9 @@ python spinless.py --cli --apply
 
 # Update ALL local artwork (ignore NFO requirement)
 python spinless.py --cli --all-local --apply
+
+# Include music library
+python spinless.py --cli --music-artists --music-albums
 
 # Specify database paths manually
 python spinless.py --cli --video-db /path/to/MyVideos131.db --texture-db /path/to/Textures14.db --apply
@@ -73,10 +77,14 @@ python spinless.py --cli --video-db /path/to/MyVideos131.db --texture-db /path/t
 | `--tvshows` | Include TV shows |
 | `--no-seasons` | Exclude seasons when processing TV shows |
 | `--no-episodes` | Exclude episodes when processing TV shows |
+| `--actors` / `--no-actors` | Include/exclude actors (default: include) |
+| `--music-artists` | Include music artists |
+| `--music-albums` | Include music albums |
 | `--nfo-logic` | Episode NFO logic: `per_item` (default) or `require_show_nfo` |
 | `--all-local` | Update ALL local artwork (ignore NFO requirement) |
 | `--path-sub FROM=TO` | Path substitution for remote DB access (repeatable) |
 | `--video-db PATH` | Path to MyVideos*.db |
+| `--music-db PATH` | Path to MyMusic*.db |
 | `--texture-db PATH` | Path to Textures*.db |
 
 ## TV Show NFO Logic
@@ -102,9 +110,19 @@ Note: Kodi doesn't use `season.nfo` files - season artwork is managed through th
 
 4. **Remote artwork unaffected** - This only matters for local artwork files. HTTP/HTTPS artwork URLs (TMDB, Fanart.tv, etc.) are never hash-checked.
 
+## Actors
+
+Actor artwork (images stored in `.actors` folders alongside your media) requires the Actors option enabled along with at least one of Movies or TV Shows. In NFO mode, actors are included if they appear in any selected content item that has an NFO file. In `--all-local` mode, all actors are included.
+
+## Music
+
+Music artwork is sourced from a separate database (`MyMusic*.db`) but cached in the same texture database as video artwork. Enable with `--music-artists` and/or `--music-albums` in CLI, or the checkboxes in GUI.
+
+Music always processes all local artwork — there's no NFO filtering. The `--all-local` flag has no effect on music content types.
+
 ## How It Works
 
-1. Scans your video database for items that have NFO files
+1. Scans your video and/or music databases for selected content types
 2. Gets local artwork URLs for those items
 3. Finds matching entries in the texture cache database
 4. Updates `lasthashcheck` to `2099-01-01 00:00:00`
