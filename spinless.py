@@ -521,7 +521,7 @@ def find_textures_to_update(
                  len(artwork_urls), len(all_textures))
     if not_cached_urls:
         for url in not_cached_urls:
-            logger.debug("Texture not cached: %s", url)
+            logger.debug("Skipped (texture not cached in Kodi): %s", url)
     return textures_to_update, len(not_cached_urls), already_future
 
 
