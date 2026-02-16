@@ -33,7 +33,7 @@ from typing import List, Optional, Tuple
 import logging
 from logging.handlers import RotatingFileHandler
 
-__version__ = "1.4.1"
+__version__ = "1.5.0"
 
 FUTURE_DATE = "2099-01-01 00:00:00"
 
