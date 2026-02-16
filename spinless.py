@@ -360,23 +360,28 @@ def get_tvshows_with_nfo(video_db: Path, progress_callback=None,
     try:
         cursor = conn.cursor()
         cursor.execute("""
-            SELECT ts.idShow, p.strPath
+            SELECT ts.idShow, ts.c00, p.strPath
             FROM tvshow ts
             JOIN tvshowlinkpath tsl ON ts.idShow = tsl.idShow
             JOIN path p ON tsl.idPath = p.idPath
         """)
 
         result = []
+        skipped = []
         rows = cursor.fetchall()
         total = len(rows)
 
-        for i, (show_id, folder_path) in enumerate(rows):
+        for i, (show_id, show_name, folder_path) in enumerate(rows):
             if has_nfo_file(folder_path, "tvshow.nfo", path_subs=path_subs):
                 result.append(show_id)
+            else:
+                skipped.append(show_name or f"id={show_id}")
             if progress_callback and i % 50 == 0:
                 progress_callback(i, total, f"Scanning TV shows for NFOs... ({i}/{total})")
 
         logger.debug("get_tvshows_with_nfo: %d/%d shows have tvshow.nfo", len(result), total)
+        if skipped:
+            logger.debug("TV shows without tvshow.nfo: %s", ", ".join(skipped))
         return result
     finally:
         conn.close()
@@ -450,12 +455,14 @@ def get_actors_for_items(video_db: Path, movie_ids: List[int],
     conn = sqlite3.connect(str(video_db))
     try:
         cursor = conn.cursor()
-        all_actor_ids = set()
+        all_actor_ids: set[int] = set()
+        per_source: dict[str, int] = {}
 
         for media_type, media_ids in [("movie", movie_ids), ("tvshow", show_ids),
                                        ("episode", episode_ids)]:
             if not media_ids:
                 continue
+            source_ids: set[int] = set()
             for chunk in _chunked(list(media_ids), _SQLITE_VAR_LIMIT):
                 placeholders = ','.join('?' * len(chunk))
                 cursor.execute(
@@ -463,11 +470,14 @@ def get_actors_for_items(video_db: Path, movie_ids: List[int],
                     f"WHERE media_type = ? AND media_id IN ({placeholders})",
                     [media_type] + chunk
                 )
-                all_actor_ids.update(row[0] for row in cursor.fetchall())
+                source_ids.update(row[0] for row in cursor.fetchall())
+            per_source[media_type] = len(source_ids)
+            all_actor_ids.update(source_ids)
 
         result = sorted(all_actor_ids)
-        logger.debug("get_actors_for_items: %d unique actors from %d movies, %d shows, %d episodes",
-                     len(result), len(movie_ids), len(show_ids), len(episode_ids))
+        source_summary = ", ".join(f"{k}={v}" for k, v in per_source.items())
+        logger.debug("get_actors_for_items: %d unique actors (sources: %s)",
+                     len(result), source_summary)
         return result
     finally:
         conn.close()
@@ -478,7 +488,7 @@ def get_actors_for_items(video_db: Path, movie_ids: List[int],
 def find_textures_to_update(
     texture_db: Path,
     artwork_urls: List[Tuple[int, str, str]]
-) -> Tuple[List[Tuple[int, str, str]], int]:
+) -> Tuple[List[Tuple[int, str, str]], int, int]:
     """Find textures that need lasthashcheck updated."""
     conn = sqlite3.connect(str(texture_db))
     try:
@@ -489,7 +499,8 @@ def find_textures_to_update(
         conn.close()
 
     textures_to_update = []
-    urls_not_found = 0
+    already_future = 0
+    not_cached_urls = []
 
     for _, _, url in artwork_urls:
         texture_url = normalize_url_for_texture(url)
@@ -497,14 +508,21 @@ def find_textures_to_update(
         match = all_textures.get(texture_url) or all_textures.get(url)
         if match:
             texture_id, current_hashcheck = match
-            if not current_hashcheck or current_hashcheck < FUTURE_DATE:
+            if current_hashcheck and current_hashcheck >= FUTURE_DATE:
+                already_future += 1
+            else:
                 textures_to_update.append((texture_id, url, current_hashcheck))
         else:
-            urls_not_found += 1
+            not_cached_urls.append(url)
 
-    logger.debug("Texture matching: %d to update, %d not cached (from %d artwork, %d textures in DB)",
-                 len(textures_to_update), urls_not_found, len(artwork_urls), len(all_textures))
-    return textures_to_update, urls_not_found
+    logger.debug("Texture matching: %d to update, %d already future, %d not cached "
+                 "(from %d artwork, %d textures in DB)",
+                 len(textures_to_update), already_future, len(not_cached_urls),
+                 len(artwork_urls), len(all_textures))
+    if not_cached_urls:
+        for url in not_cached_urls:
+            logger.debug("Texture not cached: %s", url)
+    return textures_to_update, len(not_cached_urls), already_future
 
 
 def check_database_writable(texture_db: Path):
@@ -559,6 +577,7 @@ class ScanResult:
     artwork_count: int = 0
     textures_to_update: List[Tuple[int, str, str]] = field(default_factory=list)
     not_cached: int = 0
+    already_future: int = 0
 
 
 def scan_for_updates(video_db: Optional[Path], texture_db: Path, settings: Settings,
@@ -724,8 +743,12 @@ def scan_for_updates(video_db: Optional[Path], texture_db: Path, settings: Setti
 
     if all_artwork:
         log("\nFinding textures to update...")
-        result.textures_to_update, result.not_cached = find_textures_to_update(texture_db, all_artwork)
+        textures, not_cached, already_future = find_textures_to_update(texture_db, all_artwork)
+        result.textures_to_update = textures
+        result.not_cached = not_cached
+        result.already_future = already_future
         log(f"  Textures needing update: {len(result.textures_to_update)}")
+        log(f"  Already up to date: {result.already_future}")
         log(f"  Artwork not yet cached: {result.not_cached}")
 
     return result
