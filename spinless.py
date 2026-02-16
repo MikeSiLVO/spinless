@@ -31,13 +31,16 @@ from dataclasses import dataclass, field, asdict
 from pathlib import Path
 from typing import List, Optional, Tuple
 import logging
-from logging.handlers import RotatingFileHandler
 
-__version__ = "1.6.0"
+__version__ = "1.7.0"
 
 FUTURE_DATE = "2099-01-01 00:00:00"
 
 logger = logging.getLogger("spinless")
+logger_movies = logging.getLogger("spinless.movies")
+logger_tvshows = logging.getLogger("spinless.tvshows")
+logger_music = logging.getLogger("spinless.music")
+logger_actors = logging.getLogger("spinless.actors")
 
 
 @dataclass
@@ -96,24 +99,50 @@ class Settings:
         return base / "spinless" / "settings.json"
 
 
+def _rotate_log_file(log_path: Path, max_backups: int = 3):
+    """Rotate log file per run: current -> .1, .1 -> .2, etc."""
+    log_str = str(log_path)
+    oldest = Path(f"{log_str}.{max_backups}")
+    if oldest.exists():
+        oldest.unlink()
+    for i in range(max_backups - 1, 0, -1):
+        src = Path(f"{log_str}.{i}")
+        dst = Path(f"{log_str}.{i + 1}")
+        if src.exists():
+            src.rename(dst)
+    if log_path.exists():
+        log_path.rename(Path(f"{log_str}.1"))
+
+
 def setup_logging() -> Path:
-    """Configure rotating file log. Returns log file path."""
+    """Configure per-run log files. Returns log directory path."""
     log_dir = Settings._config_path().parent
     log_dir.mkdir(parents=True, exist_ok=True)
-    log_file = log_dir / "spinless.log"
 
-    handler = RotatingFileHandler(
-        log_file, maxBytes=1_048_576, backupCount=3, encoding="utf-8"
-    )
-    handler.setFormatter(logging.Formatter(
+    log_files = {
+        "spinless": log_dir / "spinless.log",
+        "spinless.movies": log_dir / "spinless_movies.log",
+        "spinless.tvshows": log_dir / "spinless_tvshows.log",
+        "spinless.music": log_dir / "spinless_music.log",
+        "spinless.actors": log_dir / "spinless_actors.log",
+    }
+
+    formatter = logging.Formatter(
         "%(asctime)s [%(levelname)s] %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S"
-    ))
+    )
 
-    logger.setLevel(logging.DEBUG)
-    if not logger.handlers:
-        logger.addHandler(handler)
-    return log_file
+    for logger_name, log_file in log_files.items():
+        _rotate_log_file(log_file)
+        lgr = logging.getLogger(logger_name)
+        lgr.setLevel(logging.DEBUG)
+        lgr.propagate = False
+        if not lgr.handlers:
+            handler = logging.FileHandler(log_file, encoding="utf-8")
+            handler.setFormatter(formatter)
+            lgr.addHandler(handler)
+
+    return log_dir
 
 
 # --- Path utilities ---
@@ -158,7 +187,8 @@ def find_database(pattern: str) -> Optional[Path]:
     return None
 
 
-def convert_path_for_access(path: str, path_subs: Optional[list] = None) -> str:
+def convert_path_for_access(path: str, path_subs: Optional[list] = None,
+                            _log=None) -> str:
     """Convert database path to accessible filesystem path.
 
     Kodi DBs may store paths as smb:// URIs (for network sources), UNC paths,
@@ -169,6 +199,7 @@ def convert_path_for_access(path: str, path_subs: Optional[list] = None) -> str:
     - UNC backslashes are normalized to forward slashes on non-Windows
     - Drive letters are converted to /mnt/<letter> on WSL
     """
+    _log = _log or logger
     if not path:
         return path
 
@@ -182,7 +213,7 @@ def convert_path_for_access(path: str, path_subs: Optional[list] = None) -> str:
             from_norm = sub_from.replace('\\', '/').lower()
             if path_norm.startswith(from_norm):
                 path = sub_to + path[len(sub_from):]
-                logger.debug("Path sub applied: %s -> %s", original, path)
+                _log.debug("Path sub applied: %s -> %s", original, path)
                 break
 
     # Kodi stores SMB sources as smb:// URIs regardless of platform
@@ -190,7 +221,7 @@ def convert_path_for_access(path: str, path_subs: Optional[list] = None) -> str:
         # smb://host/share/path -> \\host\share\path (UNC)
         smb_path = path[6:]  # strip "smb://"
         converted = '\\\\' + smb_path.replace('/', '\\')
-        logger.debug("SMB to UNC converted: %s -> %s", path, converted)
+        _log.debug("SMB to UNC converted: %s -> %s", path, converted)
         return converted
 
     # Windows handles all Windows path formats natively
@@ -202,7 +233,7 @@ def convert_path_for_access(path: str, path_subs: Optional[list] = None) -> str:
     # UNC paths from Windows DBs: \\server\share\path -> //server/share/path
     if path.startswith('\\\\'):
         converted = path.replace('\\', '/')
-        logger.debug("UNC path converted: %s -> %s", path, converted)
+        _log.debug("UNC path converted: %s -> %s", path, converted)
         return converted
 
     # Drive letter paths from Windows DBs
@@ -210,7 +241,7 @@ def convert_path_for_access(path: str, path_subs: Optional[list] = None) -> str:
         drive = path[0].lower()
         if 'a' <= drive <= 'z':
             converted = f"/mnt/{drive}" + path[2:].replace('\\', '/')
-            logger.debug("WSL drive path converted: %s -> %s", path, converted)
+            _log.debug("WSL drive path converted: %s -> %s", path, converted)
             return converted
 
     # Normalize any remaining backslashes for non-Windows platforms
@@ -218,35 +249,37 @@ def convert_path_for_access(path: str, path_subs: Optional[list] = None) -> str:
 
 
 def has_nfo_file(folder_path: str, nfo_name: Optional[str] = None,
-                 path_subs: Optional[list] = None) -> bool:
+                 path_subs: Optional[list] = None, _log=None) -> bool:
     """Check if folder contains an NFO file. If nfo_name specified, check that exact file."""
-    converted = convert_path_for_access(folder_path, path_subs)
+    _log = _log or logger
+    converted = convert_path_for_access(folder_path, path_subs, _log=_log)
     if not os.path.isdir(converted):
-        logger.debug("NFO check: directory not found: %s", converted)
+        _log.debug("NFO check: directory not found: %s", converted)
         return False
     if nfo_name:
         found = os.path.exists(os.path.join(converted, nfo_name))
         if not found:
-            logger.debug("NFO check: %s not found in %s", nfo_name, converted)
+            _log.debug("NFO check: %s not found in %s", nfo_name, converted)
         return found
     found = len(glob.glob(os.path.join(glob.escape(converted), "*.nfo"))) > 0
     if not found:
-        logger.debug("NFO check: no *.nfo files in %s", converted)
+        _log.debug("NFO check: no *.nfo files in %s", converted)
     return found
 
 
 def has_episode_nfo(folder_path: str, episode_filename: str,
-                    path_subs: Optional[list] = None) -> bool:
+                    path_subs: Optional[list] = None, _log=None) -> bool:
     """Check if episode has matching NFO file (same name, .nfo extension)."""
-    converted = convert_path_for_access(folder_path, path_subs)
+    _log = _log or logger
+    converted = convert_path_for_access(folder_path, path_subs, _log=_log)
     if not os.path.isdir(converted):
-        logger.debug("Episode NFO check: directory not found: %s", converted)
+        _log.debug("Episode NFO check: directory not found: %s", converted)
         return False
     base_name = os.path.splitext(episode_filename)[0]
     nfo_path = os.path.join(converted, base_name + ".nfo")
     found = os.path.exists(nfo_path)
     if not found:
-        logger.debug("Episode NFO check: %s.nfo not found in %s", base_name, converted)
+        _log.debug("Episode NFO check: %s.nfo not found in %s", base_name, converted)
     return found
 
 
@@ -342,7 +375,7 @@ def get_movies_with_nfo(video_db: Path, progress_callback=None,
         total = len(rows)
 
         for i, (movie_id, folder_path) in enumerate(rows):
-            if has_nfo_file(folder_path, path_subs=path_subs):
+            if has_nfo_file(folder_path, path_subs=path_subs, _log=logger_movies):
                 result.append(movie_id)
             if progress_callback and i % 100 == 0:
                 progress_callback(i, total, f"Scanning movies for NFOs... ({i}/{total})")
@@ -372,7 +405,7 @@ def get_tvshows_with_nfo(video_db: Path, progress_callback=None,
         total = len(rows)
 
         for i, (show_id, show_name, folder_path) in enumerate(rows):
-            if has_nfo_file(folder_path, "tvshow.nfo", path_subs=path_subs):
+            if has_nfo_file(folder_path, "tvshow.nfo", path_subs=path_subs, _log=logger_tvshows):
                 result.append(show_id)
             else:
                 skipped.append(show_name or f"id={show_id}")
@@ -381,7 +414,7 @@ def get_tvshows_with_nfo(video_db: Path, progress_callback=None,
 
         logger.debug("get_tvshows_with_nfo: %d/%d shows have tvshow.nfo", len(result), total)
         if skipped:
-            logger.debug("TV shows without tvshow.nfo: %s", ", ".join(skipped))
+            logger_tvshows.debug("TV shows without tvshow.nfo: %s", ", ".join(skipped))
         return result
     finally:
         conn.close()
@@ -438,7 +471,7 @@ def get_episodes_with_nfo(video_db: Path, show_ids: Optional[List[int]] = None,
         total = len(rows)
 
         for i, (episode_id, folder_path, filename) in enumerate(rows):
-            if has_episode_nfo(folder_path, filename, path_subs=path_subs):
+            if has_episode_nfo(folder_path, filename, path_subs=path_subs, _log=logger_tvshows):
                 result.append(episode_id)
             if progress_callback and i % 200 == 0:
                 progress_callback(i, total, f"Scanning episodes for NFOs... ({i}/{total})")
@@ -449,54 +482,28 @@ def get_episodes_with_nfo(video_db: Path, show_ids: Optional[List[int]] = None,
         conn.close()
 
 
-def get_actors_for_items(video_db: Path, movie_ids: List[int],
-                         show_ids: List[int], episode_ids: List[int]) -> List[int]:
-    """Get unique actor IDs linked to specified movies, shows, and episodes."""
-    conn = sqlite3.connect(str(video_db))
-    try:
-        cursor = conn.cursor()
-        all_actor_ids: set[int] = set()
-        per_source: dict[str, int] = {}
-
-        for media_type, media_ids in [("movie", movie_ids), ("tvshow", show_ids),
-                                       ("episode", episode_ids)]:
-            if not media_ids:
-                continue
-            source_ids: set[int] = set()
-            for chunk in _chunked(list(media_ids), _SQLITE_VAR_LIMIT):
-                placeholders = ','.join('?' * len(chunk))
-                cursor.execute(
-                    f"SELECT DISTINCT actor_id FROM actor_link "
-                    f"WHERE media_type = ? AND media_id IN ({placeholders})",
-                    [media_type] + chunk
-                )
-                source_ids.update(row[0] for row in cursor.fetchall())
-            per_source[media_type] = len(source_ids)
-            all_actor_ids.update(source_ids)
-
-        result = sorted(all_actor_ids)
-        source_summary = ", ".join(f"{k}={v}" for k, v in per_source.items())
-        logger.debug("get_actors_for_items: %d unique actors (sources: %s)",
-                     len(result), source_summary)
-        return result
-    finally:
-        conn.close()
-
-
 # --- Texture processing ---
 
-def find_textures_to_update(
-    texture_db: Path,
-    artwork_urls: List[Tuple[int, str, str]]
-) -> Tuple[List[Tuple[int, str, str]], int, int]:
-    """Find textures that need lasthashcheck updated."""
+def load_texture_cache(texture_db: Path) -> dict:
+    """Load all textures from texture database."""
     conn = sqlite3.connect(str(texture_db))
     try:
         cursor = conn.cursor()
         cursor.execute("SELECT id, url, lasthashcheck FROM texture")
-        all_textures = {row[1]: (row[0], row[2]) for row in cursor.fetchall()}
+        cache = {row[1]: (row[0], row[2]) for row in cursor.fetchall()}
+        logger.debug("Loaded %d textures from cache", len(cache))
+        return cache
     finally:
         conn.close()
+
+
+def find_textures_to_update(
+    texture_cache: dict,
+    artwork_urls: List[Tuple[int, str, str]],
+    detail_logger=None
+) -> Tuple[List[Tuple[int, str, str]], int, int]:
+    """Find textures that need lasthashcheck updated."""
+    _log = detail_logger or logger
 
     textures_to_update = []
     already_future = 0
@@ -505,7 +512,7 @@ def find_textures_to_update(
     for _, _, url in artwork_urls:
         texture_url = normalize_url_for_texture(url)
 
-        match = all_textures.get(texture_url) or all_textures.get(url)
+        match = texture_cache.get(texture_url) or texture_cache.get(url)
         if match:
             texture_id, current_hashcheck = match
             if current_hashcheck and current_hashcheck >= FUTURE_DATE:
@@ -516,12 +523,11 @@ def find_textures_to_update(
             not_cached_urls.append(url)
 
     logger.debug("Texture matching: %d to update, %d already future, %d not cached "
-                 "(from %d artwork, %d textures in DB)",
+                 "(from %d artwork)",
                  len(textures_to_update), already_future, len(not_cached_urls),
-                 len(artwork_urls), len(all_textures))
-    if not_cached_urls:
-        for url in not_cached_urls:
-            logger.debug("Skipped (texture not cached in Kodi): %s", url)
+                 len(artwork_urls))
+    for url in not_cached_urls:
+        _log.debug("Skipped (texture not cached in Kodi): %s", url)
     return textures_to_update, len(not_cached_urls), already_future
 
 
@@ -585,18 +591,20 @@ def scan_for_updates(video_db: Optional[Path], texture_db: Path, settings: Setti
                      music_db: Optional[Path] = None) -> ScanResult:
     """Scan databases and find textures needing updates based on settings."""
     result = ScanResult()
-    all_artwork: List[Tuple[int, str, str]] = []
     path_subs = settings.path_substitutions or None
 
     def log(msg):
         if log_callback:
             log_callback(msg)
 
-    movie_ids = []
-    show_ids = []
-    episode_ids = []
+    texture_cache = load_texture_cache(texture_db)
+    all_textures: List[Tuple[int, str, str]] = []
+    total_not_cached = 0
+    total_already_future = 0
 
-    # Movies
+    # --- Movies / Sets / Music Videos ---
+    movies_artwork: List[Tuple[int, str, str]] = []
+
     if settings.include_movies and video_db:
         log("Scanning movies...")
         if settings.update_all_local:
@@ -611,9 +619,8 @@ def scan_for_updates(video_db: Optional[Path], texture_db: Path, settings: Setti
         if movie_ids:
             artwork = query_local_artwork(video_db, "movie", movie_ids)
             log(f"  Found {len(artwork)} local movie artwork entries")
-            all_artwork.extend(artwork)
+            movies_artwork.extend(artwork)
 
-    # Movie Sets
     if settings.include_sets and video_db:
         log("\nScanning movie sets...")
         set_ids = query_all_ids(video_db, "sets", "idSet")
@@ -623,9 +630,33 @@ def scan_for_updates(video_db: Optional[Path], texture_db: Path, settings: Setti
         if set_ids:
             artwork = query_local_artwork(video_db, "set", set_ids)
             log(f"  Found {len(artwork)} local set artwork entries")
-            all_artwork.extend(artwork)
+            movies_artwork.extend(artwork)
 
-    # TV Shows
+    if settings.include_musicvideos and video_db:
+        log("\nScanning music videos...")
+        musicvideo_ids = query_all_ids(video_db, "musicvideo", "idMVideo")
+        log(f"  Found {len(musicvideo_ids)} music videos")
+
+        result.musicvideo_count = len(musicvideo_ids)
+        if musicvideo_ids:
+            artwork = query_local_artwork(video_db, "musicvideo", musicvideo_ids)
+            log(f"  Found {len(artwork)} local music video artwork entries")
+            movies_artwork.extend(artwork)
+
+    if movies_artwork:
+        log("\nMatching movie/set/musicvideo textures...")
+        textures, nc, af = find_textures_to_update(texture_cache, movies_artwork, logger_movies)
+        all_textures.extend(textures)
+        total_not_cached += nc
+        total_already_future += af
+        log(f"  Textures to update: {len(textures)}")
+        log(f"  Already up to date: {af}")
+        log(f"  Not cached: {nc}")
+
+    # --- TV Shows / Seasons / Episodes ---
+    tvshows_artwork: List[Tuple[int, str, str]] = []
+    show_ids: List[int] = []
+
     if settings.include_tvshows and video_db:
         log("\nScanning TV shows...")
 
@@ -641,7 +672,7 @@ def scan_for_updates(video_db: Optional[Path], texture_db: Path, settings: Setti
         if show_ids:
             artwork = query_local_artwork(video_db, "tvshow", show_ids)
             log(f"  Found {len(artwork)} local TV show artwork entries")
-            all_artwork.extend(artwork)
+            tvshows_artwork.extend(artwork)
 
         # Seasons
         if settings.include_seasons:
@@ -657,7 +688,7 @@ def scan_for_updates(video_db: Optional[Path], texture_db: Path, settings: Setti
             if season_ids:
                 artwork = query_local_artwork(video_db, "season", season_ids)
                 log(f"  Found {len(artwork)} local season artwork entries")
-                all_artwork.extend(artwork)
+                tvshows_artwork.extend(artwork)
 
         # Episodes
         if settings.include_episodes:
@@ -680,42 +711,45 @@ def scan_for_updates(video_db: Optional[Path], texture_db: Path, settings: Setti
             if episode_ids:
                 artwork = query_local_artwork(video_db, "episode", episode_ids)
                 log(f"  Found {len(artwork)} local episode artwork entries")
-                all_artwork.extend(artwork)
+                tvshows_artwork.extend(artwork)
 
-    # Music Videos
-    if settings.include_musicvideos and video_db:
-        log("\nScanning music videos...")
-        musicvideo_ids = query_all_ids(video_db, "musicvideo", "idMVideo")
-        log(f"  Found {len(musicvideo_ids)} music videos")
+    if tvshows_artwork:
+        log("\nMatching TV show textures...")
+        textures, nc, af = find_textures_to_update(texture_cache, tvshows_artwork, logger_tvshows)
+        all_textures.extend(textures)
+        total_not_cached += nc
+        total_already_future += af
+        log(f"  Textures to update: {len(textures)}")
+        log(f"  Already up to date: {af}")
+        log(f"  Not cached: {nc}")
 
-        result.musicvideo_count = len(musicvideo_ids)
-        if musicvideo_ids:
-            artwork = query_local_artwork(video_db, "musicvideo", musicvideo_ids)
-            log(f"  Found {len(artwork)} local music video artwork entries")
-            all_artwork.extend(artwork)
+    # --- Actors ---
+    actors_artwork: List[Tuple[int, str, str]] = []
 
-    # Actors
-    if settings.include_actors and video_db and (settings.include_movies or settings.include_tvshows):
+    if settings.include_actors and video_db:
         log("\nScanning actors...")
-        if settings.update_all_local:
-            actor_ids = query_all_ids(video_db, "actor", "actor_id")
-            log(f"  Found {len(actor_ids)} actors (all)")
-        else:
-            actor_ids = get_actors_for_items(
-                video_db,
-                movie_ids if settings.include_movies else [],
-                show_ids if settings.include_tvshows else [],
-                episode_ids if (settings.include_tvshows and settings.include_episodes) else []
-            )
-            log(f"  Found {len(actor_ids)} actors linked to selected content")
+        actor_ids = query_all_ids(video_db, "actor", "actor_id")
+        log(f"  Found {len(actor_ids)} actors")
 
         result.actor_count = len(actor_ids)
         if actor_ids:
             artwork = query_local_artwork(video_db, "actor", actor_ids)
             log(f"  Found {len(artwork)} local actor artwork entries")
-            all_artwork.extend(artwork)
+            actors_artwork.extend(artwork)
 
-    # Music Artists
+    if actors_artwork:
+        log("\nMatching actor textures...")
+        textures, nc, af = find_textures_to_update(texture_cache, actors_artwork, logger_actors)
+        all_textures.extend(textures)
+        total_not_cached += nc
+        total_already_future += af
+        log(f"  Textures to update: {len(textures)}")
+        log(f"  Already up to date: {af}")
+        log(f"  Not cached: {nc}")
+
+    # --- Music ---
+    music_artwork: List[Tuple[int, str, str]] = []
+
     if settings.include_music_artists and music_db:
         log("\nScanning music artists...")
         artist_ids = query_all_ids(music_db, "artist", "idArtist")
@@ -725,9 +759,8 @@ def scan_for_updates(video_db: Optional[Path], texture_db: Path, settings: Setti
         if artist_ids:
             artwork = query_local_artwork(music_db, "artist", artist_ids)
             log(f"  Found {len(artwork)} local artist artwork entries")
-            all_artwork.extend(artwork)
+            music_artwork.extend(artwork)
 
-    # Music Albums
     if settings.include_music_albums and music_db:
         log("\nScanning music albums...")
         album_ids = query_all_ids(music_db, "album", "idAlbum")
@@ -737,19 +770,29 @@ def scan_for_updates(video_db: Optional[Path], texture_db: Path, settings: Setti
         if album_ids:
             artwork = query_local_artwork(music_db, "album", album_ids)
             log(f"  Found {len(artwork)} local album artwork entries")
-            all_artwork.extend(artwork)
+            music_artwork.extend(artwork)
 
-    result.artwork_count = len(all_artwork)
+    if music_artwork:
+        log("\nMatching music textures...")
+        textures, nc, af = find_textures_to_update(texture_cache, music_artwork, logger_music)
+        all_textures.extend(textures)
+        total_not_cached += nc
+        total_already_future += af
+        log(f"  Textures to update: {len(textures)}")
+        log(f"  Already up to date: {af}")
+        log(f"  Not cached: {nc}")
 
-    if all_artwork:
-        log("\nFinding textures to update...")
-        textures, not_cached, already_future = find_textures_to_update(texture_db, all_artwork)
-        result.textures_to_update = textures
-        result.not_cached = not_cached
-        result.already_future = already_future
-        log(f"  Textures needing update: {len(result.textures_to_update)}")
-        log(f"  Already up to date: {result.already_future}")
-        log(f"  Artwork not yet cached: {result.not_cached}")
+    # Aggregate
+    total_artwork = len(movies_artwork) + len(tvshows_artwork) + len(actors_artwork) + len(music_artwork)
+    result.artwork_count = total_artwork
+    result.textures_to_update = all_textures
+    result.not_cached = total_not_cached
+    result.already_future = total_already_future
+
+    if all_textures:
+        log(f"\nTotal textures to update: {len(all_textures)}")
+        log(f"Total already up to date: {total_already_future}")
+        log(f"Total not cached: {total_not_cached}")
 
     return result
 
@@ -1321,7 +1364,7 @@ class SpinlessApp:
 
 
 def run_gui(video_db: Optional[Path], texture_db: Optional[Path], settings: Settings,
-            log_file: Optional[Path] = None, music_db: Optional[Path] = None):
+            log_dir: Optional[Path] = None, music_db: Optional[Path] = None):
     """Run in GUI mode."""
     try:
         import tkinter as tk
@@ -1333,8 +1376,8 @@ def run_gui(video_db: Optional[Path], texture_db: Optional[Path], settings: Sett
 
     root = tk.Tk()
     app = SpinlessApp(root, video_db, texture_db, settings, music_db=music_db)
-    if log_file:
-        app._log(f"Log file: {log_file}")
+    if log_dir:
+        app._log(f"Log directory: {log_dir}")
     root.mainloop()
 
 
@@ -1397,11 +1440,11 @@ Examples:
     args = parser.parse_args()
 
     try:
-        log_file = setup_logging()
+        log_dir = setup_logging()
         logger.info("Spinless v%s started (platform=%s)", __version__, platform.system())
     except Exception as e:
-        print(f"Warning: Could not set up log file: {e}", file=sys.stderr)
-        log_file = None
+        print(f"Warning: Could not set up log files: {e}", file=sys.stderr)
+        log_dir = None
 
     settings = Settings.load()
 
@@ -1448,8 +1491,8 @@ Examples:
     wants_music = settings.include_music_artists or settings.include_music_albums
 
     if args.cli:
-        if log_file:
-            print(f"Log file: {log_file}\n")
+        if log_dir:
+            print(f"Log directory: {log_dir}\n")
         if wants_video and (not video_db or not video_db.exists()):
             logger.error("Video database not found: %s", video_db)
             print("ERROR: Video database not found. Use --video-db to specify path.")
@@ -1464,7 +1507,7 @@ Examples:
             sys.exit(1)
         run_cli(video_db, texture_db, settings, args.apply, music_db=music_db)
     else:
-        run_gui(video_db, texture_db, settings, log_file=log_file, music_db=music_db)
+        run_gui(video_db, texture_db, settings, log_dir=log_dir, music_db=music_db)
 
 
 if __name__ == "__main__":

@@ -114,7 +114,7 @@ Note: Kodi doesn't use `season.nfo` files - season artwork is managed through th
 
 ## Actors
 
-Actor artwork (images stored in `.actors` folders alongside your media) requires the Actors option enabled along with at least one of Movies or TV Shows. In NFO mode, actors are included if they appear in any selected content item that has an NFO file. In `--all-local` mode, all actors are included.
+Actor artwork is stored in `.actors` folders alongside your media. The Actors option processes all actors in the video database — no NFO filtering is applied, since images in `.actors` folders are always deliberately placed. The `--all-local` flag has no effect on actors.
 
 ## Music
 
@@ -145,29 +145,28 @@ Settings are saved to:
 
 ## Logging
 
-Spinless automatically logs to a rotating log file in the same directory as settings. No configuration needed.
+Spinless logs to multiple files in its config directory, split by category for easier debugging.
 
-| Platform | Log file |
-|----------|----------|
-| Windows | `%APPDATA%\spinless\spinless.log` |
-| Linux | `~/.config/spinless/spinless.log` |
-| macOS | `~/Library/Application Support/spinless/spinless.log` |
+| File | Contents |
+|------|----------|
+| `spinless.log` | Run settings, item counts, texture summaries, apply results, errors |
+| `spinless_movies.log` | Per-item: movie/set/music video NFO checks, uncached textures |
+| `spinless_tvshows.log` | Per-item: TV show/episode NFO checks, uncached textures |
+| `spinless_actors.log` | Per-item: uncached actor textures |
+| `spinless_music.log` | Per-item: uncached music textures |
 
-- **Rotation**: 1 MB max per file, 3 backups kept (`spinless.log.1`, `.2`, `.3`) — 4 MB total cap
-- **Verbosity**: Always logs at DEBUG level for full diagnostic detail
-- **Log file path** is shown in the CLI output and in the GUI results pane on startup
+| Platform | Log directory |
+|----------|---------------|
+| Windows | `%APPDATA%\spinless\` |
+| Linux | `~/.config/spinless/` |
+| macOS | `~/Library/Application Support/spinless/` |
 
-The log captures:
+- **Rotation**: Logs rotate per run (not by size). Previous run becomes `.1`, the one before `.2`, etc. Up to 3 previous runs are kept.
+- **Main log** (`spinless.log`): Start here for an overview of what happened — settings, counts, and results.
+- **Detail logs**: Check these when you need to find out why a specific item was skipped (NFO not found, texture not cached, directory not found).
+- **Log directory** is shown in the CLI output and in the GUI results pane on startup.
 
-- Settings, database paths, and path substitutions used for each run
-- Scan progress: item counts, artwork found, textures matched
-- Per-item NFO check results — which directories weren't found and which were missing NFO files
-- Path conversions (WSL drive mapping, UNC paths, user-defined substitutions)
-- Database auto-detection: which paths were searched and what was found
-- Apply operations: how many textures were updated
-- Errors with full tracebacks
-
-The log is the first place to check when results are unexpected (e.g., fewer items found than expected). Run a scan, then check the log for `"directory not found"` or `"not found in"` entries to see exactly which items were skipped and why.
+When results are unexpected (e.g., fewer items found than expected), check the relevant detail log for `"directory not found"` or `"not found in"` entries to see exactly which items were skipped and why.
 
 ## Database Locations
 
