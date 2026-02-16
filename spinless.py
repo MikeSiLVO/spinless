@@ -47,6 +47,7 @@ class Settings:
     include_tvshows: bool = False
     include_seasons: bool = True
     include_episodes: bool = True
+    include_actors: bool = True
     tvshow_nfo_logic: str = "per_item"
     update_all_local: bool = False
 
@@ -259,6 +260,7 @@ _VALID_TABLE_COLUMNS = {
     ("tvshow", "idShow"),
     ("seasons", "idSeason"),
     ("episode", "idEpisode"),
+    ("actor", "actor_id"),
 }
 
 
@@ -416,6 +418,34 @@ def get_episodes_with_nfo(video_db: Path, show_ids: Optional[List[int]] = None,
         conn.close()
 
 
+def get_actors_for_items(video_db: Path, movie_ids: List[int],
+                         show_ids: List[int], episode_ids: List[int]) -> List[int]:
+    """Get unique actor IDs linked to specified movies, shows, and episodes."""
+    conn = sqlite3.connect(str(video_db))
+    try:
+        cursor = conn.cursor()
+        all_actor_ids = set()
+
+        for media_type, media_ids in [("movie", movie_ids), ("tvshow", show_ids),
+                                       ("episode", episode_ids)]:
+            if not media_ids:
+                continue
+            placeholders = ','.join('?' * len(media_ids))
+            cursor.execute(
+                f"SELECT DISTINCT actor_id FROM actor_link "
+                f"WHERE media_type = ? AND media_id IN ({placeholders})",
+                [media_type] + list(media_ids)
+            )
+            all_actor_ids.update(row[0] for row in cursor.fetchall())
+
+        result = sorted(all_actor_ids)
+        logger.debug("get_actors_for_items: %d unique actors from %d movies, %d shows, %d episodes",
+                     len(result), len(movie_ids), len(show_ids), len(episode_ids))
+        return result
+    finally:
+        conn.close()
+
+
 # --- Texture processing ---
 
 def find_textures_to_update(
@@ -494,6 +524,7 @@ class ScanResult:
     tvshow_count: int = 0
     season_count: int = 0
     episode_count: int = 0
+    actor_count: int = 0
     artwork_count: int = 0
     textures_to_update: List[Tuple[int, str, str]] = field(default_factory=list)
     not_cached: int = 0
@@ -509,6 +540,10 @@ def scan_for_updates(video_db: Path, texture_db: Path, settings: Settings,
     def log(msg):
         if log_callback:
             log_callback(msg)
+
+    movie_ids = []
+    show_ids = []
+    episode_ids = []
 
     # Movies
     if settings.include_movies:
@@ -584,6 +619,27 @@ def scan_for_updates(video_db: Path, texture_db: Path, settings: Settings,
                 log(f"  Found {len(artwork)} local episode artwork entries")
                 all_artwork.extend(artwork)
 
+    # Actors
+    if settings.include_actors and (settings.include_movies or settings.include_tvshows):
+        log("\nScanning actors...")
+        if settings.update_all_local:
+            actor_ids = query_all_ids(video_db, "actor", "actor_id")
+            log(f"  Found {len(actor_ids)} actors (all)")
+        else:
+            actor_ids = get_actors_for_items(
+                video_db,
+                movie_ids if settings.include_movies else [],
+                show_ids if settings.include_tvshows else [],
+                episode_ids if (settings.include_tvshows and settings.include_episodes) else []
+            )
+            log(f"  Found {len(actor_ids)} actors linked to selected content")
+
+        result.actor_count = len(actor_ids)
+        if actor_ids:
+            artwork = query_local_artwork(video_db, "actor", actor_ids)
+            log(f"  Found {len(artwork)} local actor artwork entries")
+            all_artwork.extend(artwork)
+
     result.artwork_count = len(all_artwork)
 
     if all_artwork:
@@ -601,9 +657,10 @@ def run_cli(video_db: Path, texture_db: Path, settings: Settings, apply: bool = 
     """Run in command-line mode."""
     logger.info("CLI mode started (apply=%s)", apply)
     logger.info("Video DB: %s | Texture DB: %s", video_db, texture_db)
-    logger.info("Settings: movies=%s tvshows=%s seasons=%s episodes=%s nfo_logic=%s all_local=%s",
+    logger.info("Settings: movies=%s tvshows=%s seasons=%s episodes=%s actors=%s nfo_logic=%s all_local=%s",
                 settings.include_movies, settings.include_tvshows, settings.include_seasons,
-                settings.include_episodes, settings.tvshow_nfo_logic, settings.update_all_local)
+                settings.include_episodes, settings.include_actors, settings.tvshow_nfo_logic,
+                settings.update_all_local)
     if settings.path_substitutions:
         for sub_from, sub_to in settings.path_substitutions:
             logger.info("Path sub: %s -> %s", sub_from, sub_to)
@@ -627,6 +684,7 @@ def run_cli(video_db: Path, texture_db: Path, settings: Settings, apply: bool = 
         print(f"    Seasons: {'Yes' if settings.include_seasons else 'No'}")
         print(f"    Episodes: {'Yes' if settings.include_episodes else 'No'}")
         print(f"    NFO Logic: {settings.tvshow_nfo_logic}")
+    print(f"  Actors: {'Yes' if settings.include_actors else 'No'}")
     print(f"  Update All Local: {'Yes' if settings.update_all_local else 'No (NFO only)'}")
     if settings.path_substitutions:
         print("  Path Substitutions:")
@@ -700,6 +758,7 @@ class SpinlessApp:
         self.include_tvshows = tk.BooleanVar(value=settings.include_tvshows)
         self.include_seasons = tk.BooleanVar(value=settings.include_seasons)
         self.include_episodes = tk.BooleanVar(value=settings.include_episodes)
+        self.include_actors = tk.BooleanVar(value=settings.include_actors)
         self.tvshow_nfo_logic = tk.StringVar(value=settings.tvshow_nfo_logic)
         self.update_all_local = tk.BooleanVar(value=settings.update_all_local)
 
@@ -771,7 +830,8 @@ class SpinlessApp:
 
         ttk.Checkbutton(content_frame, text="Movies", variable=self.include_movies).pack(side="left", padx=(0, 15))
         ttk.Checkbutton(content_frame, text="TV Shows", variable=self.include_tvshows,
-                       command=self._update_tvshow_state).pack(side="left")
+                       command=self._update_tvshow_state).pack(side="left", padx=(0, 15))
+        ttk.Checkbutton(content_frame, text="Actors", variable=self.include_actors).pack(side="left")
 
         # TV Show Options
         ttk.Label(settings_frame, text="TV Show Options:").grid(row=1, column=0, sticky="nw", pady=2)
@@ -925,6 +985,7 @@ class SpinlessApp:
             include_tvshows=self.include_tvshows.get(),
             include_seasons=self.include_seasons.get(),
             include_episodes=self.include_episodes.get(),
+            include_actors=self.include_actors.get(),
             tvshow_nfo_logic=self.tvshow_nfo_logic.get(),
             update_all_local=self.update_all_local.get(),
             path_substitutions=[[f.get(), t.get()] for f, t, _ in self.path_sub_rows
@@ -990,9 +1051,10 @@ class SpinlessApp:
     def _do_scan(self, video_db: Path, texture_db: Path):
         logger.info("GUI scan started: video_db=%s texture_db=%s", video_db, texture_db)
         settings = self._get_current_settings()
-        logger.info("Settings: movies=%s tvshows=%s seasons=%s episodes=%s nfo_logic=%s all_local=%s",
+        logger.info("Settings: movies=%s tvshows=%s seasons=%s episodes=%s actors=%s nfo_logic=%s all_local=%s",
                     settings.include_movies, settings.include_tvshows, settings.include_seasons,
-                    settings.include_episodes, settings.tvshow_nfo_logic, settings.update_all_local)
+                    settings.include_episodes, settings.include_actors, settings.tvshow_nfo_logic,
+                    settings.update_all_local)
         if settings.path_substitutions:
             for sub_from, sub_to in settings.path_substitutions:
                 logger.info("Path sub: %s -> %s", sub_from, sub_to)
@@ -1025,6 +1087,8 @@ class SpinlessApp:
             log(f"  Seasons: {result.season_count}")
         if result.episode_count:
             log(f"  Episodes: {result.episode_count}")
+        if result.actor_count:
+            log(f"  Actors: {result.actor_count}")
         log(f"  Total artwork: {result.artwork_count}")
         log(f"  Textures to update: {len(result.textures_to_update)}")
         log("\nClick 'Apply Changes' to proceed")
@@ -1120,6 +1184,10 @@ Examples:
     parser.add_argument("--tvshows", action="store_true", help="Include TV shows")
     parser.add_argument("--no-seasons", action="store_true", help="Exclude seasons")
     parser.add_argument("--no-episodes", action="store_true", help="Exclude episodes")
+    parser.add_argument("--actors", action="store_true", dest="actors", default=None,
+                       help="Include actors (default: yes)")
+    parser.add_argument("--no-actors", action="store_false", dest="actors",
+                       help="Exclude actors")
 
     parser.add_argument("--nfo-logic", choices=["per_item", "require_show_nfo"],
                        default="per_item", help="Episode NFO logic (default: per_item)")
@@ -1151,6 +1219,8 @@ Examples:
         settings.include_seasons = False
     if args.no_episodes:
         settings.include_episodes = False
+    if args.actors is not None:
+        settings.include_actors = args.actors
     if args.nfo_logic:
         settings.tvshow_nfo_logic = args.nfo_logic
     if args.all_local:
