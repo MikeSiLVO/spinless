@@ -48,6 +48,8 @@ class Settings:
     include_seasons: bool = True
     include_episodes: bool = True
     include_actors: bool = True
+    include_music_artists: bool = False
+    include_music_albums: bool = False
     tvshow_nfo_logic: str = "per_item"
     update_all_local: bool = False
 
@@ -56,6 +58,7 @@ class Settings:
     # Database paths (not saved)
     video_db: str = ""
     texture_db: str = ""
+    music_db: str = ""
 
     @classmethod
     def load(cls) -> "Settings":
@@ -74,7 +77,7 @@ class Settings:
         """Save settings to config file."""
         config_path = self._config_path()
         config_path.parent.mkdir(parents=True, exist_ok=True)
-        data = {k: v for k, v in asdict(self).items() if k not in ("video_db", "texture_db")}
+        data = {k: v for k, v in asdict(self).items() if k not in ("video_db", "texture_db", "music_db")}
         with open(config_path, "w") as f:
             json.dump(data, f, indent=2)
 
@@ -261,6 +264,8 @@ _VALID_TABLE_COLUMNS = {
     ("seasons", "idSeason"),
     ("episode", "idEpisode"),
     ("actor", "actor_id"),
+    ("artist", "idArtist"),
+    ("album", "idAlbum"),
 }
 
 
@@ -525,13 +530,16 @@ class ScanResult:
     season_count: int = 0
     episode_count: int = 0
     actor_count: int = 0
+    artist_count: int = 0
+    album_count: int = 0
     artwork_count: int = 0
     textures_to_update: List[Tuple[int, str, str]] = field(default_factory=list)
     not_cached: int = 0
 
 
-def scan_for_updates(video_db: Path, texture_db: Path, settings: Settings,
-                     log_callback=None, progress_callback=None) -> ScanResult:
+def scan_for_updates(video_db: Optional[Path], texture_db: Path, settings: Settings,
+                     log_callback=None, progress_callback=None,
+                     music_db: Optional[Path] = None) -> ScanResult:
     """Scan databases and find textures needing updates based on settings."""
     result = ScanResult()
     all_artwork: List[Tuple[int, str, str]] = []
@@ -546,7 +554,7 @@ def scan_for_updates(video_db: Path, texture_db: Path, settings: Settings,
     episode_ids = []
 
     # Movies
-    if settings.include_movies:
+    if settings.include_movies and video_db:
         log("Scanning movies...")
         if settings.update_all_local:
             movie_ids = query_all_ids(video_db, "movie", "idMovie")
@@ -563,7 +571,7 @@ def scan_for_updates(video_db: Path, texture_db: Path, settings: Settings,
             all_artwork.extend(artwork)
 
     # TV Shows
-    if settings.include_tvshows:
+    if settings.include_tvshows and video_db:
         log("\nScanning TV shows...")
 
         if settings.update_all_local:
@@ -620,7 +628,7 @@ def scan_for_updates(video_db: Path, texture_db: Path, settings: Settings,
                 all_artwork.extend(artwork)
 
     # Actors
-    if settings.include_actors and (settings.include_movies or settings.include_tvshows):
+    if settings.include_actors and video_db and (settings.include_movies or settings.include_tvshows):
         log("\nScanning actors...")
         if settings.update_all_local:
             actor_ids = query_all_ids(video_db, "actor", "actor_id")
@@ -640,6 +648,30 @@ def scan_for_updates(video_db: Path, texture_db: Path, settings: Settings,
             log(f"  Found {len(artwork)} local actor artwork entries")
             all_artwork.extend(artwork)
 
+    # Music Artists
+    if settings.include_music_artists and music_db:
+        log("\nScanning music artists...")
+        artist_ids = query_all_ids(music_db, "artist", "idArtist")
+        log(f"  Found {len(artist_ids)} artists")
+
+        result.artist_count = len(artist_ids)
+        if artist_ids:
+            artwork = query_local_artwork(music_db, "artist", artist_ids)
+            log(f"  Found {len(artwork)} local artist artwork entries")
+            all_artwork.extend(artwork)
+
+    # Music Albums
+    if settings.include_music_albums and music_db:
+        log("\nScanning music albums...")
+        album_ids = query_all_ids(music_db, "album", "idAlbum")
+        log(f"  Found {len(album_ids)} albums")
+
+        result.album_count = len(album_ids)
+        if album_ids:
+            artwork = query_local_artwork(music_db, "album", album_ids)
+            log(f"  Found {len(artwork)} local album artwork entries")
+            all_artwork.extend(artwork)
+
     result.artwork_count = len(all_artwork)
 
     if all_artwork:
@@ -653,14 +685,17 @@ def scan_for_updates(video_db: Path, texture_db: Path, settings: Settings,
 
 # --- CLI ---
 
-def run_cli(video_db: Path, texture_db: Path, settings: Settings, apply: bool = False) -> int:
+def run_cli(video_db: Optional[Path], texture_db: Path, settings: Settings,
+            apply: bool = False, music_db: Optional[Path] = None) -> int:
     """Run in command-line mode."""
     logger.info("CLI mode started (apply=%s)", apply)
-    logger.info("Video DB: %s | Texture DB: %s", video_db, texture_db)
-    logger.info("Settings: movies=%s tvshows=%s seasons=%s episodes=%s actors=%s nfo_logic=%s all_local=%s",
+    logger.info("Video DB: %s | Texture DB: %s | Music DB: %s", video_db, texture_db, music_db)
+    logger.info("Settings: movies=%s tvshows=%s seasons=%s episodes=%s actors=%s "
+                "music_artists=%s music_albums=%s nfo_logic=%s all_local=%s",
                 settings.include_movies, settings.include_tvshows, settings.include_seasons,
-                settings.include_episodes, settings.include_actors, settings.tvshow_nfo_logic,
-                settings.update_all_local)
+                settings.include_episodes, settings.include_actors,
+                settings.include_music_artists, settings.include_music_albums,
+                settings.tvshow_nfo_logic, settings.update_all_local)
     if settings.path_substitutions:
         for sub_from, sub_to in settings.path_substitutions:
             logger.info("Path sub: %s -> %s", sub_from, sub_to)
@@ -673,7 +708,10 @@ def run_cli(video_db: Path, texture_db: Path, settings: Settings, apply: bool = 
         print("Use --apply to actually update the database")
         print()
 
-    print(f"Video DB:   {video_db}")
+    if video_db:
+        print(f"Video DB:   {video_db}")
+    if music_db:
+        print(f"Music DB:   {music_db}")
     print(f"Texture DB: {texture_db}")
     print()
 
@@ -685,6 +723,8 @@ def run_cli(video_db: Path, texture_db: Path, settings: Settings, apply: bool = 
         print(f"    Episodes: {'Yes' if settings.include_episodes else 'No'}")
         print(f"    NFO Logic: {settings.tvshow_nfo_logic}")
     print(f"  Actors: {'Yes' if settings.include_actors else 'No'}")
+    print(f"  Music Artists: {'Yes' if settings.include_music_artists else 'No'}")
+    print(f"  Music Albums: {'Yes' if settings.include_music_albums else 'No'}")
     print(f"  Update All Local: {'Yes' if settings.update_all_local else 'No (NFO only)'}")
     if settings.path_substitutions:
         print("  Path Substitutions:")
@@ -697,7 +737,8 @@ def run_cli(video_db: Path, texture_db: Path, settings: Settings, apply: bool = 
         if msg.strip():
             logger.info(msg.strip())
 
-    result = scan_for_updates(video_db, texture_db, settings, log_callback=cli_log)
+    result = scan_for_updates(video_db, texture_db, settings, log_callback=cli_log,
+                              music_db=music_db)
     print()
 
     if not result.textures_to_update:
@@ -735,7 +776,8 @@ def run_cli(video_db: Path, texture_db: Path, settings: Settings, apply: bool = 
 class SpinlessApp:
     """Tkinter GUI application."""
 
-    def __init__(self, root, video_db: Optional[Path], texture_db: Optional[Path], settings: Settings):
+    def __init__(self, root, video_db: Optional[Path], texture_db: Optional[Path],
+                 settings: Settings, music_db: Optional[Path] = None):
         import tkinter as tk
         from tkinter import ttk, scrolledtext
 
@@ -746,12 +788,13 @@ class SpinlessApp:
 
         self.root = root
         self.root.title(f"Spinless v{__version__}")
-        self.root.geometry("800x780")
+        self.root.geometry("800x830")
         self.root.resizable(True, True)
 
         self.settings = settings
         self.video_db_path = tk.StringVar(value=str(video_db) if video_db else "")
         self.texture_db_path = tk.StringVar(value=str(texture_db) if texture_db else "")
+        self.music_db_path = tk.StringVar(value=str(music_db) if music_db else "")
         self.textures_to_update: List[Tuple[int, str, str]] = []
 
         self.include_movies = tk.BooleanVar(value=settings.include_movies)
@@ -759,6 +802,8 @@ class SpinlessApp:
         self.include_seasons = tk.BooleanVar(value=settings.include_seasons)
         self.include_episodes = tk.BooleanVar(value=settings.include_episodes)
         self.include_actors = tk.BooleanVar(value=settings.include_actors)
+        self.include_music_artists = tk.BooleanVar(value=settings.include_music_artists)
+        self.include_music_albums = tk.BooleanVar(value=settings.include_music_albums)
         self.tvshow_nfo_logic = tk.StringVar(value=settings.tvshow_nfo_logic)
         self.update_all_local = tk.BooleanVar(value=settings.update_all_local)
 
@@ -805,6 +850,14 @@ class SpinlessApp:
         ttk.Button(vf, text="Browse", command=self._browse_video).grid(row=0, column=1, padx=(5, 0))
         row += 1
 
+        ttk.Label(main, text="Music Database:").grid(row=row, column=0, sticky="w", pady=3)
+        mf = ttk.Frame(main)
+        mf.grid(row=row, column=1, sticky="ew", pady=3)
+        mf.columnconfigure(0, weight=1)
+        ttk.Entry(mf, textvariable=self.music_db_path, width=70).grid(row=0, column=0, sticky="ew")
+        ttk.Button(mf, text="Browse", command=self._browse_music).grid(row=0, column=1, padx=(5, 0))
+        row += 1
+
         ttk.Label(main, text="Texture Database:").grid(row=row, column=0, sticky="w", pady=3)
         tf = ttk.Frame(main)
         tf.grid(row=row, column=1, sticky="ew", pady=3)
@@ -833,10 +886,18 @@ class SpinlessApp:
                        command=self._update_tvshow_state).pack(side="left", padx=(0, 15))
         ttk.Checkbutton(content_frame, text="Actors", variable=self.include_actors).pack(side="left")
 
+        # Music Types
+        ttk.Label(settings_frame, text="Music:").grid(row=1, column=0, sticky="w", pady=2)
+        music_frame = ttk.Frame(settings_frame)
+        music_frame.grid(row=1, column=1, sticky="w", pady=2)
+
+        ttk.Checkbutton(music_frame, text="Artists", variable=self.include_music_artists).pack(side="left", padx=(0, 15))
+        ttk.Checkbutton(music_frame, text="Albums", variable=self.include_music_albums).pack(side="left")
+
         # TV Show Options
-        ttk.Label(settings_frame, text="TV Show Options:").grid(row=1, column=0, sticky="nw", pady=2)
+        ttk.Label(settings_frame, text="TV Show Options:").grid(row=2, column=0, sticky="nw", pady=2)
         tv_frame = ttk.Frame(settings_frame)
-        tv_frame.grid(row=1, column=1, sticky="w", pady=2)
+        tv_frame.grid(row=2, column=1, sticky="w", pady=2)
 
         self.seasons_cb = ttk.Checkbutton(tv_frame, text="Include Seasons", variable=self.include_seasons)
         self.seasons_cb.pack(anchor="w")
@@ -844,9 +905,9 @@ class SpinlessApp:
         self.episodes_cb.pack(anchor="w")
 
         # NFO Logic
-        ttk.Label(settings_frame, text="Episode NFO Logic:").grid(row=2, column=0, sticky="nw", pady=2)
+        ttk.Label(settings_frame, text="Episode NFO Logic:").grid(row=3, column=0, sticky="nw", pady=2)
         nfo_frame = ttk.Frame(settings_frame)
-        nfo_frame.grid(row=2, column=1, sticky="w", pady=2)
+        nfo_frame.grid(row=3, column=1, sticky="w", pady=2)
 
         self.per_item_rb = ttk.Radiobutton(nfo_frame, text="Per-item (episode has own NFO)",
                                             variable=self.tvshow_nfo_logic, value="per_item")
@@ -856,10 +917,10 @@ class SpinlessApp:
         self.require_show_rb.pack(anchor="w")
 
         # Advanced
-        ttk.Separator(settings_frame, orient="horizontal").grid(row=3, column=0, columnspan=2, sticky="ew", pady=8)
-        ttk.Label(settings_frame, text="Advanced:").grid(row=4, column=0, sticky="w", pady=2)
+        ttk.Separator(settings_frame, orient="horizontal").grid(row=4, column=0, columnspan=2, sticky="ew", pady=8)
+        ttk.Label(settings_frame, text="Advanced:").grid(row=5, column=0, sticky="w", pady=2)
         ttk.Checkbutton(settings_frame, text="Update ALL local artwork (ignore NFO requirement)",
-                       variable=self.update_all_local).grid(row=4, column=1, sticky="w", pady=2)
+                       variable=self.update_all_local).grid(row=5, column=1, sticky="w", pady=2)
 
         # Path Substitutions
         path_frame = ttk.LabelFrame(main, text="Path Substitutions (optional)", padding="10")
@@ -952,6 +1013,14 @@ class SpinlessApp:
         if p:
             self.video_db_path.set(p)
 
+    def _browse_music(self):
+        p = self._get_filedialog().askopenfilename(
+            title="Select Music Database",
+            filetypes=[("SQLite Database", "MyMusic*.db"), ("All", "*.*")]
+        )
+        if p:
+            self.music_db_path.set(p)
+
     def _browse_texture(self):
         p = self._get_filedialog().askopenfilename(
             title="Select Texture Database",
@@ -986,12 +1055,15 @@ class SpinlessApp:
             include_seasons=self.include_seasons.get(),
             include_episodes=self.include_episodes.get(),
             include_actors=self.include_actors.get(),
+            include_music_artists=self.include_music_artists.get(),
+            include_music_albums=self.include_music_albums.get(),
             tvshow_nfo_logic=self.tvshow_nfo_logic.get(),
             update_all_local=self.update_all_local.get(),
             path_substitutions=[[f.get(), t.get()] for f, t, _ in self.path_sub_rows
                                 if f.get().strip()],
             video_db=self.video_db_path.get(),
-            texture_db=self.texture_db_path.get()
+            texture_db=self.texture_db_path.get(),
+            music_db=self.music_db_path.get()
         )
 
     def _save_settings(self):
@@ -1003,18 +1075,26 @@ class SpinlessApp:
 
         video_db = self.video_db_path.get()
         texture_db = self.texture_db_path.get()
+        music_db = self.music_db_path.get()
         messagebox = self._get_messagebox()
 
-        if not video_db or not os.path.exists(video_db):
+        wants_video = self.include_movies.get() or self.include_tvshows.get() or self.include_actors.get()
+        wants_music = self.include_music_artists.get() or self.include_music_albums.get()
+
+        if wants_video and (not video_db or not os.path.exists(video_db)):
             logger.error("GUI validation: Video database not found: %s", video_db)
             messagebox.showerror("Error", "Video database not found")
+            return
+        if wants_music and (not music_db or not os.path.exists(music_db)):
+            logger.error("GUI validation: Music database not found: %s", music_db)
+            messagebox.showerror("Error", "Music database not found")
             return
         if not texture_db or not os.path.exists(texture_db):
             logger.error("GUI validation: Texture database not found: %s", texture_db)
             messagebox.showerror("Error", "Texture database not found")
             return
 
-        if not self.include_movies.get() and not self.include_tvshows.get():
+        if not wants_video and not wants_music:
             logger.error("GUI validation: No content type selected")
             messagebox.showerror("Error", "Select at least one content type")
             return
@@ -1032,7 +1112,11 @@ class SpinlessApp:
 
         def worker():
             try:
-                self._do_scan(Path(video_db), Path(texture_db))
+                self._do_scan(
+                    Path(video_db) if video_db else None,
+                    Path(texture_db),
+                    music_db=Path(music_db) if music_db else None
+                )
             except Exception as e:
                 logger.exception("Scan failed")
                 msg = str(e)
@@ -1048,13 +1132,17 @@ class SpinlessApp:
         self._set_buttons(scanning=False, can_apply=can_apply)
         self._set_status("Scan complete" if can_apply else "Nothing to update")
 
-    def _do_scan(self, video_db: Path, texture_db: Path):
-        logger.info("GUI scan started: video_db=%s texture_db=%s", video_db, texture_db)
+    def _do_scan(self, video_db: Optional[Path], texture_db: Path,
+                 music_db: Optional[Path] = None):
+        logger.info("GUI scan started: video_db=%s texture_db=%s music_db=%s",
+                    video_db, texture_db, music_db)
         settings = self._get_current_settings()
-        logger.info("Settings: movies=%s tvshows=%s seasons=%s episodes=%s actors=%s nfo_logic=%s all_local=%s",
+        logger.info("Settings: movies=%s tvshows=%s seasons=%s episodes=%s actors=%s "
+                    "music_artists=%s music_albums=%s nfo_logic=%s all_local=%s",
                     settings.include_movies, settings.include_tvshows, settings.include_seasons,
-                    settings.include_episodes, settings.include_actors, settings.tvshow_nfo_logic,
-                    settings.update_all_local)
+                    settings.include_episodes, settings.include_actors,
+                    settings.include_music_artists, settings.include_music_albums,
+                    settings.tvshow_nfo_logic, settings.update_all_local)
         if settings.path_substitutions:
             for sub_from, sub_to in settings.path_substitutions:
                 logger.info("Path sub: %s -> %s", sub_from, sub_to)
@@ -1062,7 +1150,8 @@ class SpinlessApp:
         def log(msg):
             self.root.after(0, lambda m=msg: self._log(m))
 
-        result = scan_for_updates(video_db, texture_db, settings, log_callback=log)
+        result = scan_for_updates(video_db, texture_db, settings, log_callback=log,
+                                  music_db=music_db)
 
         if not result.textures_to_update:
             log("\nAll textures already up to date.")
@@ -1089,6 +1178,10 @@ class SpinlessApp:
             log(f"  Episodes: {result.episode_count}")
         if result.actor_count:
             log(f"  Actors: {result.actor_count}")
+        if result.artist_count:
+            log(f"  Music Artists: {result.artist_count}")
+        if result.album_count:
+            log(f"  Music Albums: {result.album_count}")
         log(f"  Total artwork: {result.artwork_count}")
         log(f"  Textures to update: {len(result.textures_to_update)}")
         log("\nClick 'Apply Changes' to proceed")
@@ -1139,7 +1232,7 @@ class SpinlessApp:
 
 
 def run_gui(video_db: Optional[Path], texture_db: Optional[Path], settings: Settings,
-            log_file: Optional[Path] = None):
+            log_file: Optional[Path] = None, music_db: Optional[Path] = None):
     """Run in GUI mode."""
     try:
         import tkinter as tk
@@ -1150,7 +1243,7 @@ def run_gui(video_db: Optional[Path], texture_db: Optional[Path], settings: Sett
         sys.exit(1)
 
     root = tk.Tk()
-    app = SpinlessApp(root, video_db, texture_db, settings)
+    app = SpinlessApp(root, video_db, texture_db, settings, music_db=music_db)
     if log_file:
         app._log(f"Log file: {log_file}")
     root.mainloop()
@@ -1169,12 +1262,14 @@ Examples:
   %(prog)s --cli --apply       Apply changes via terminal
   %(prog)s --cli --tvshows     Include TV shows
   %(prog)s --cli --all-local   Update all local artwork (ignore NFO)
+  %(prog)s --cli --music-artists --music-albums  Include music library
   %(prog)s --cli --path-sub "\\\\server\\share=D:\\Media"  Map remote paths to local
         """
     )
     parser.add_argument("--cli", action="store_true", help="Run in command-line mode (no GUI)")
     parser.add_argument("--apply", action="store_true", help="Apply changes (CLI mode only)")
     parser.add_argument("--video-db", type=Path, help="Path to MyVideos*.db")
+    parser.add_argument("--music-db", type=Path, help="Path to MyMusic*.db")
     parser.add_argument("--texture-db", type=Path, help="Path to Textures*.db")
 
     parser.add_argument("--movies", action="store_true", dest="movies", default=None,
@@ -1188,6 +1283,10 @@ Examples:
                        help="Include actors (default: yes)")
     parser.add_argument("--no-actors", action="store_false", dest="actors",
                        help="Exclude actors")
+    parser.add_argument("--music-artists", action="store_true",
+                       help="Include music artists")
+    parser.add_argument("--music-albums", action="store_true",
+                       help="Include music albums")
 
     parser.add_argument("--nfo-logic", choices=["per_item", "require_show_nfo"],
                        default="per_item", help="Episode NFO logic (default: per_item)")
@@ -1221,6 +1320,10 @@ Examples:
         settings.include_episodes = False
     if args.actors is not None:
         settings.include_actors = args.actors
+    if args.music_artists:
+        settings.include_music_artists = True
+    if args.music_albums:
+        settings.include_music_albums = True
     if args.nfo_logic:
         settings.tvshow_nfo_logic = args.nfo_logic
     if args.all_local:
@@ -1238,22 +1341,30 @@ Examples:
         settings.path_substitutions = subs
 
     video_db = args.video_db or find_database("MyVideos*.db")
+    music_db = args.music_db or find_database("MyMusic*.db")
     texture_db = args.texture_db or find_database("Textures*.db")
+
+    wants_video = settings.include_movies or settings.include_tvshows or settings.include_actors
+    wants_music = settings.include_music_artists or settings.include_music_albums
 
     if args.cli:
         if log_file:
             print(f"Log file: {log_file}\n")
-        if not video_db or not video_db.exists():
+        if wants_video and (not video_db or not video_db.exists()):
             logger.error("Video database not found: %s", video_db)
             print("ERROR: Video database not found. Use --video-db to specify path.")
+            sys.exit(1)
+        if wants_music and (not music_db or not music_db.exists()):
+            logger.error("Music database not found: %s", music_db)
+            print("ERROR: Music database not found. Use --music-db to specify path.")
             sys.exit(1)
         if not texture_db or not texture_db.exists():
             logger.error("Texture database not found: %s", texture_db)
             print("ERROR: Texture database not found. Use --texture-db to specify path.")
             sys.exit(1)
-        run_cli(video_db, texture_db, settings, args.apply)
+        run_cli(video_db, texture_db, settings, args.apply, music_db=music_db)
     else:
-        run_gui(video_db, texture_db, settings, log_file=log_file)
+        run_gui(video_db, texture_db, settings, log_file=log_file, music_db=music_db)
 
 
 if __name__ == "__main__":
