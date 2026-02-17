@@ -32,7 +32,7 @@ from pathlib import Path
 from typing import List, Optional, Tuple
 import logging
 
-__version__ = "1.7.0"
+__version__ = "1.7.1"
 
 FUTURE_DATE = "2099-01-01 00:00:00"
 
@@ -531,6 +531,40 @@ def find_textures_to_update(
     return textures_to_update, len(not_cached_urls), already_future
 
 
+def find_actor_folder_textures(
+    texture_cache: dict,
+    exclude_ids: set,
+    detail_logger=None
+) -> Tuple[List[Tuple[int, str, str]], int]:
+    """Find .actors folder textures directly from texture cache.
+
+    Kodi caches actor thumbnails from .actors folders into the texture DB
+    but these paths typically don't appear in the art table (which stores
+    HTTP scraper URLs for actors instead). Scan the texture cache directly.
+    """
+    _log = detail_logger or logger
+    to_update = []
+    already_future = 0
+
+    for url, (texture_id, hashcheck) in texture_cache.items():
+        if texture_id in exclude_ids:
+            continue
+        if '\\.actors\\' not in url and '/.actors/' not in url:
+            continue
+        if hashcheck and hashcheck >= FUTURE_DATE:
+            already_future += 1
+        else:
+            to_update.append((texture_id, url, hashcheck))
+
+    logger.debug("Actor folder scan: %d to update, %d already future, %d excluded",
+                 len(to_update), already_future, len(exclude_ids))
+    for tid, url, hashcheck in to_update:
+        _log.debug("Actor folder texture: [%d] %s (current: %s)",
+                   tid, url, hashcheck or "NULL")
+
+    return to_update, already_future
+
+
 def check_database_writable(texture_db: Path):
     """Verify texture database is not locked by Kodi."""
     try:
@@ -746,6 +780,17 @@ def scan_for_updates(video_db: Optional[Path], texture_db: Path, settings: Setti
         log(f"  Textures to update: {len(textures)}")
         log(f"  Already up to date: {af}")
         log(f"  Not cached: {nc}")
+
+    # .actors folder thumbs live in the texture cache but not in the art table
+    if settings.include_actors:
+        already_queued = {t[0] for t in all_textures}
+        folder_textures, folder_future = find_actor_folder_textures(
+            texture_cache, already_queued, logger_actors)
+        if folder_textures or folder_future:
+            all_textures.extend(folder_textures)
+            total_already_future += folder_future
+            log(f"\nActor folder thumbnails to update: {len(folder_textures)}")
+            log(f"Actor folder thumbnails up to date: {folder_future}")
 
     # --- Music ---
     music_artwork: List[Tuple[int, str, str]] = []
