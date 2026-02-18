@@ -32,7 +32,7 @@ from pathlib import Path
 from typing import List, Optional, Tuple
 import logging
 
-__version__ = "1.7.1"
+__version__ = "1.8.0"
 
 FUTURE_DATE = "2099-01-01 00:00:00"
 
@@ -357,6 +357,70 @@ def query_local_artwork(video_db: Path, media_type: str, media_ids: List[int]) -
         conn.close()
 
 
+def _has_table(video_db: Path, table_name: str) -> bool:
+    """Check if a table exists in the database."""
+    conn = sqlite3.connect(str(video_db))
+    try:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+            (table_name,)
+        )
+        return cursor.fetchone() is not None
+    finally:
+        conn.close()
+
+
+def query_videoversion_artwork(video_db: Path, movie_ids: List[int]) -> Tuple[List[Tuple[int, str, str]], int]:
+    """Get local artwork for non-default movie versions.
+
+    Returns (artwork_rows, version_count) where artwork_rows are
+    (media_id, art_type, url) tuples using videoversion's idFile as media_id,
+    and version_count is the number of non-default versions found.
+    """
+    if not movie_ids or not _has_table(video_db, "videoversion"):
+        return [], 0
+
+    conn = sqlite3.connect(str(video_db))
+    try:
+        cursor = conn.cursor()
+        version_file_ids: List[int] = []
+        for chunk in _chunked(list(movie_ids), _SQLITE_VAR_LIMIT):
+            placeholders = ','.join('?' * len(chunk))
+            # Non-default versions: idFile != movie.idFile
+            cursor.execute(f"""
+                SELECT vv.idFile
+                FROM videoversion vv
+                JOIN movie m ON vv.idMedia = m.idMovie
+                WHERE vv.media_type = 'movie'
+                  AND vv.idFile != m.idFile
+                  AND vv.idMedia IN ({placeholders})
+            """, chunk)
+            version_file_ids.extend(row[0] for row in cursor.fetchall())
+
+        if not version_file_ids:
+            return [], 0
+
+        rows: List[Tuple[int, str, str]] = []
+        for chunk in _chunked(version_file_ids, _SQLITE_VAR_LIMIT):
+            placeholders = ','.join('?' * len(chunk))
+            cursor.execute(f"""
+                SELECT media_id, type, url
+                FROM art
+                WHERE media_type = 'videoversion'
+                  AND media_id IN ({placeholders})
+                  AND url NOT LIKE 'http%'
+                  AND url NOT LIKE 'image://%'
+            """, chunk)
+            rows.extend(cursor.fetchall())
+
+        logger.debug("query_videoversion_artwork: %d versions, %d local art entries",
+                     len(version_file_ids), len(rows))
+        return rows, len(version_file_ids)
+    finally:
+        conn.close()
+
+
 def get_movies_with_nfo(video_db: Path, progress_callback=None,
                         path_subs: Optional[list] = None) -> List[int]:
     """Get movie IDs that have NFO files."""
@@ -606,6 +670,7 @@ def apply_updates(texture_db: Path, textures: List[Tuple[int, str, str]]) -> int
 class ScanResult:
     """Results from scanning for artwork to update."""
     movie_count: int = 0
+    videoversion_count: int = 0
     set_count: int = 0
     tvshow_count: int = 0
     season_count: int = 0
@@ -654,6 +719,12 @@ def scan_for_updates(video_db: Optional[Path], texture_db: Path, settings: Setti
             artwork = query_local_artwork(video_db, "movie", movie_ids)
             log(f"  Found {len(artwork)} local movie artwork entries")
             movies_artwork.extend(artwork)
+
+            vv_artwork, vv_count = query_videoversion_artwork(video_db, movie_ids)
+            if vv_count:
+                result.videoversion_count = vv_count
+                log(f"  Found {vv_count} video versions with {len(vv_artwork)} local artwork entries")
+                movies_artwork.extend(vv_artwork)
 
     if settings.include_sets and video_db:
         log("\nScanning movie sets...")
@@ -1343,6 +1414,8 @@ class SpinlessApp:
         log("Summary:")
         if result.movie_count:
             log(f"  Movies: {result.movie_count}")
+        if result.videoversion_count:
+            log(f"  Video Versions: {result.videoversion_count}")
         if result.tvshow_count:
             log(f"  TV Shows: {result.tvshow_count}")
         if result.season_count:
